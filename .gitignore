@@ -1,0 +1,8 @@
+backend/target/
+app/build/
+app/.dart_tool/
+worker/.venv/
+**/__pycache__/
+**/.pytest_cache/
+.test-data/
+*.log
