@@ -17,7 +17,7 @@
 > [!NOTE]
 > For personal use only. The app downloads audio from YouTube / YouTube Music with
 > yt-dlp; respect YouTube's Terms of Service and copyright law in your country, and
-> only download music you have the right to.
+> "only download music you have the right to".
 
 A desktop music player for Linux in the spirit of YouTube Music and Spotify.
 Search YouTube Music, download songs or whole playlists as tagged MP3s, build
