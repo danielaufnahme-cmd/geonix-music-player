@@ -6,3 +6,4 @@ worker/.venv/
 **/.pytest_cache/
 .test-data/
 *.log
+.DS_Store

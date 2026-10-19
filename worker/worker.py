@@ -119,6 +119,9 @@ def build_handlers() -> dict[str, Handler]:
         limit = int(req.get("limit") or 30)
         return {"tracks": recommender.recommend(seeds, exclude, max(1, min(limit, 100)))}
 
+    def song_info(req: dict[str, Any], _p: Callable[[dict[str, Any]], None]) -> dict[str, Any]:
+        return ytm.song_info(require(req, "video_id", str))
+
     def stream_url(req: dict[str, Any], _p: Callable[[dict[str, Any]], None]) -> dict[str, Any]:
         return ytm.stream_url(require(req, "video_id", str))
 
@@ -138,6 +141,7 @@ def build_handlers() -> dict[str, Handler]:
         "playlist_info": playlist_info,
         "download": download,
         "recommend": recommend,
+        "song_info": song_info,
         "stream_url": stream_url,
         "lyrics": lyrics,
         "ping": ping,
@@ -154,6 +158,11 @@ def claim_stdout() -> TextIO:
 
 
 def main() -> None:
+    # The backend speaks UTF-8; Windows would otherwise decode stdin and
+    # encode log lines with the ANSI code page and choke on non-ASCII titles.
+    for stream in (sys.stdin, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
     logging.basicConfig(
         stream=sys.stderr,
         level=os.environ.get("GEONIX_WORKER_LOG", "INFO").upper(),

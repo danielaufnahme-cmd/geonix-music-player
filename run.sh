@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
 # Build and start Geonix Music Player: Python worker venv, Rust backend,
-# Flutter desktop app. Closing the app stops the backend (and its worker).
+# Flutter desktop app (Linux or macOS; Windows: launch.ps1). Closing the
+# app stops the backend (and its worker).
 set -euo pipefail
 cd "$(dirname "$0")"
+
+if [ "$(uname -s)" = "Darwin" ]; then TARGET=macos; else TARGET=linux; fi
 
 PORT="${GEONIX_PORT:-7878}"
 API="http://127.0.0.1:${PORT}"
 
-need() { command -v "$1" >/dev/null 2>&1 || { echo "Missing '$1' — see README.md (Install)." >&2; exit 1; }; }
+need() { command -v "$1" >/dev/null 2>&1 || { echo "Missing '$1' — run ./setup.sh --check, or see README.md (Getting started)." >&2; exit 1; }; }
 for tool in python3 cargo flutter ffmpeg curl; do need "$tool"; done
 
 if curl -sf "${API}/api/health" >/dev/null 2>&1; then
@@ -23,7 +26,7 @@ echo "==> Rust backend"
 (cd backend && cargo build --release)
 
 echo "==> Flutter app"
-(cd app && flutter pub get >/dev/null && flutter build linux --release --dart-define=GEONIX_API="${API}")
+(cd app && flutter pub get >/dev/null && flutter build "${TARGET}" --release --dart-define=GEONIX_API="${API}")
 
 echo "==> Starting backend on ${API}"
 GEONIX_PORT="${PORT}" backend/target/release/geonix-backend &
@@ -37,4 +40,13 @@ for _ in $(seq 1 50); do
 done
 
 echo "==> Opening Geonix"
-app/build/linux/x64/release/bundle/geonix_music_player
+if [ "${TARGET}" = macos ]; then
+  APP_BIN=""
+  for exe in app/build/macos/Build/Products/Release/*.app/Contents/MacOS/*; do
+    [ -x "$exe" ] && { APP_BIN="$exe"; break; }
+  done
+  [ -n "${APP_BIN}" ] || { echo "macOS app bundle not found." >&2; exit 1; }
+  "${APP_BIN}"
+else
+  app/build/linux/x64/release/bundle/geonix_music_player
+fi

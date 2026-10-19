@@ -8,35 +8,293 @@
 > and giving feedback. It started as a test to compare AI coding models on the
 > same prompt.
 
+> [!NOTE]
+> For personal use only. The app downloads audio from YouTube / YouTube Music with
+> yt-dlp; respect YouTube's Terms of Service and copyright law in your country, and
+> "only download music you have the right to".
+
+A desktop music player for Linux, macOS and Windows in the spirit of YouTube Music and Spotify.
+Search YouTube Music, download songs or whole playlists as tagged MP3s, build
+playlists, play everything locally, and get a "For You" feed plus a daily
+Discover Mix based on what you actually listen to.
+
+**Highlights**
+
+- Search YouTube Music (songs only), preview anything, download songs or whole playlists
+  as MP3s with ID3 tags and cover art.
+- Library with Songs, Artists, Albums and Playlists, drag-and-drop playlist ordering,
+  synced lyrics and an editable "Up next" queue.
+- "For You" home screen and a daily **Discover Mix** built from your own listening.
+- **Device sync:** pair your computers with a 6-letter code and they copy songs and
+  playlists to each other over [Tailscale](https://tailscale.com). Additive, never deletes.
+- **Private listening:** one click pauses your listening history and recommendations.
+- Optional phone extras: add music from a phone web page, and listen on the phone
+  through Navidrome.
+- Runs on Linux, macOS and Windows. Everything stays on your machine.
+
+> **Install it:** jump to [Getting started](#getting-started--installation) at the end.
+
+## Screenshots
+
 ![Home](screenshots/home.png)
 
 | Now Playing (synced lyrics + Up next) | Downloads |
 |---|---|
 | ![Now Playing](screenshots/now-playing.png) | ![Downloads](screenshots/downloads.png) |
 
-> [!NOTE]
-> For personal use only. The app downloads audio from YouTube / YouTube Music with
-> yt-dlp; respect YouTube's Terms of Service and copyright law in your country, and
-> "only download music you have the right to".
+## Using it
 
-A desktop music player for Linux in the spirit of YouTube Music and Spotify.
-Search YouTube Music, download songs or whole playlists as tagged MP3s, build
-playlists, play everything locally, and get a "For You" feed plus a daily
-Discover Mix based on what you actually listen to.
+- **Search** YouTube Music for songs only; videos, podcasts and user uploads are filtered out.
+  Click a result to preview it, or use the download button.
+- **Playlist import:** paste a YouTube or YouTube Music playlist link into
+  Search to preview it, then "Download all". A local playlist with the same
+  name and order appears immediately and fills up as songs finish downloading.
+- **Download queue:** at most 3 downloads at once, with live progress and speed.
+  Failed downloads show the reason and a Retry button. Songs already in your
+  library are skipped. Downloads that were running when the app quit are marked
+  as failed on the next start, so you can retry them.
+- **Tagged MP3s:** title, artist and album are written as ID3 tags, with embedded cover art.
+- **Library:** Songs, Artists, Albums and Playlists views, an instant text
+  filter, and sorting by date added, title, artist, album, most played or
+  recently played. Play counts and the last-played time are tracked.
+- **Playlists:** create, rename, delete, add or remove songs, and reorder by
+  drag and drop. Covers are a 2×2 mosaic of the first four songs. Deleting a
+  playlist never deletes files.
+- **Player:** play/pause, next, previous, seek, volume, shuffle, and repeat
+  (off/all/one). The "Up next" queue can be reordered, edited and jumped
+  through. A glass player bar is always visible, and a full-screen Now Playing
+  view has a gradient taken from the cover's colors.
+- **For You:** the Home screen has Recently played, Your top songs,
+  Recommended for you and "Because you listened to …". The Discover Mix is
+  rebuilt with a button and automatically once a day; preview or download its
+  songs one by one or all at once.
+- **Private listening:** the toggle in the sidebar pauses your listening history.
+  While it is on, songs you play don't change play counts, "Recently played",
+  "Your top songs" or recommendations. Click it again to turn it off. The setting
+  is stored by the backend and survives restarts.
+- **Look:** dark theme by default plus a light theme. The accent color is
+  taken from the playing song's cover and fades smoothly. Hover animations,
+  page transitions, a morphing play button, loading skeletons and friendly
+  empty states. Plus Jakarta Sans font. The window's minimum size is 1000×650.
+- **Keyboard:** Space toggles play/pause, Ctrl+→ and Ctrl+← skip to the
+  next or previous song, Ctrl+F opens Search. Shortcuts are ignored while you
+  type in a text field.
+
+### How recommendations work
+
+The worker takes up to 10 seed songs: your 5 most played and your 5 most
+recently added. For each seed it asks YouTube Music for its radio (the songs
+it would play next). Songs found through several seeds score highest, and an
+earlier position in a seed's list breaks ties. Songs already in your library
+are removed, and no artist may fill more than 4 spots. Each recommendation
+remembers which seed found it, which powers "Because you listened to …".
+
+## Sync between devices and the phone (optional)
+
+Everything in this section is optional. The player works fine on a single computer
+without Tailscale, Navidrome or a phone.
+
+### Sync between devices
+
+Every computer runs its own copy of Music Player with its own library. Sync copies
+songs and playlists between them, directly from computer to computer.
+
+**Requirements**
+- [Tailscale](https://tailscale.com/download) on every device, all logged in to the
+  same tailnet (Linux: `curl -fsSL https://tailscale.com/install.sh | sh && sudo tailscale up`;
+  macOS: `brew install --cask tailscale`; Windows: `winget install -e --id tailscale.tailscale`).
+- Music Player installed and open (the backend running) on the devices you sync.
+- The sync port **7803/TCP** reachable over Tailscale. The backend only accepts peers
+  from Tailscale addresses (100.64.0.0/10, fd7a:115c:a1e0::/48) and localhost. If you
+  run a firewall, allow 7803 on the Tailscale interface, e.g.
+  `sudo ufw allow in on tailscale0 to any port 7803 proto tcp`,
+  `sudo firewall-cmd --zone=trusted --add-interface=tailscale0 --permanent`, or on Windows (admin PowerShell)
+  `New-NetFirewallRule -DisplayName "Music Player sync" -Direction Inbound -Protocol TCP -LocalPort 7803 -RemoteAddress 100.64.0.0/10 -Action Allow`.
+  Change the port with `GEONIX_SYNC_PORT` (on all devices).
+- macOS may ask whether `geonix-backend` may accept incoming connections: allow it.
+
+**Pairing**
+1. Click the **devices** icon in the app. It shows this device's **6-letter code**.
+2. On the other device, open the same dialog, choose **Add device** and type that code.
+   The backend finds the device with that code among the online devices on your
+   tailnet; no IP addresses needed. Both devices remember each other; the code
+   changes after each pairing (or when you click "new code").
+3. Pair as many devices as you like.
+
+**Syncing**
+- **Sync now** pulls everything the other device has and asks it to pull from you,
+  so both end up with all songs and playlists. Progress shows in the dialog.
+- Every time the app opens it syncs automatically with the paired devices that are online.
+- Sync is **additive and never deletes anything**: missing songs are copied (same
+  Artist/Album folders), playlists are matched by name and missing songs are appended.
+  Songs or playlists you delete on one device are not deleted on the others.
+  The Discover Mix stays per device.
+
+### Adding music from the phone
+
+The backend also serves a phone-friendly page at `/` (embedded from `backend/web/`):
+paste a YouTube / YouTube Music link and it detects what it is.
+
+- **Song** → preview with an "In library" badge → Download.
+- **Playlist or album** → preview of every song (In library / Will download) and three options:
+  create a new playlist (editable name), add to an existing playlist, or download the songs
+  only (no playlist changes, `POST /api/downloads {"playlist_url", "mode": "songs_only"}`).
+- **Song opened from a playlist** (`watch?v=…&list=…`) → asks "just this song or the whole
+  playlist?". Auto-generated radio mixes (`list=RD…`) count as the song.
+- Live progress over SSE, retry for failed songs, and a list of recent downloads.
+
+Link detection lives in `backend/src/resolve.rs` (`GET /api/resolve?url=…[&as=song|playlist]`).
+
+The backend listens on `127.0.0.1` only. To reach the page from a phone on your tailnet,
+publish it with Tailscale Serve (on Linux prefix `tailscale` with `sudo`, or run
+`sudo tailscale set --operator=$USER` once):
+
+```bash
+tailscale serve --bg --https=7802 http://127.0.0.1:7802
+```
+
+Then open `https://your-pc.your-tailnet.ts.net:7802` on the phone (your machine's name
+and tailnet are shown by `tailscale status`) and add it to the home screen.
+The page only works while the backend runs: either keep the desktop app open, or run the
+backend all the time as a service, e.g. a systemd user unit
+`~/.config/systemd/user/geonix-backend.service`:
+
+```ini
+[Unit]
+Description=Geonix Music Player backend
+
+[Service]
+Environment=GEONIX_PORT=7802
+Environment=GEONIX_DATA_DIR=%h/.local/share/geonix
+Environment=GEONIX_MUSIC_DIR=%h/Music/Geonix
+ExecStart=/path/to/geonix-music-player/backend/target/release/geonix-backend
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+```
+
+`systemctl --user enable --now geonix-backend`. The desktop app (`./launch.sh`) sees the
+running backend on the same port and reuses it.
+
+### Listening on the phone (Navidrome + Amperfy)
+
+The library can also be streamed to a phone with [Navidrome](https://www.navidrome.org)
+(a Subsonic-compatible music server) and a Subsonic app such as **Amperfy** (iPhone)
+or Symfonium / Tempo (Android), over Tailscale. The repo has three optional helpers in
+`tools/`:
+
+| File | What it does |
+|---|---|
+| `tools/sync_playlists.py` | Exports the app's playlists as `.m3u8` files into `<music dir>/Playlists/`, which Navidrome imports. Only downloaded songs are included; the Discover Mix is skipped. Only files it created are ever removed. |
+| `tools/navidrome_rescan.py` | Asks Navidrome to rescan now, using Subsonic token auth (the password is never sent in plain text). Reads the login from `~/.config/navidrome/LOGIN.txt` (or `NAVIDROME_LOGIN_FILE`) and the server from `NAVIDROME_URL` (default `http://127.0.0.1:4533`). Does nothing if the file is missing. |
+| `tools/after_downloads.sh` | Runs the two above. Point `GEONIX_AFTER_DOWNLOADS` at it and the backend runs it about 10 s after downloads or playlist imports finish, so new songs reach the phone within about a minute. |
+
+Setup (Linux example):
+
+1. Install Navidrome (`sudo pacman -S navidrome`, or see
+   [navidrome.org/docs/installation](https://www.navidrome.org/docs/installation/)) and set
+   its music folder to your Geonix music folder, e.g. in `navidrome.toml`:
+   `MusicFolder = "/home/you/Music/Geonix"` and `Address = "127.0.0.1"`.
+   Create your Navidrome user in its web UI (`http://127.0.0.1:4533`).
+2. Save that login for the rescan helper and keep it private:
+   ```bash
+   mkdir -p ~/.config/navidrome
+   printf 'Username: you\nPassword: your-navidrome-password\n' > ~/.config/navidrome/LOGIN.txt
+   chmod 600 ~/.config/navidrome/LOGIN.txt
+   ```
+3. Add this line to `~/.config/geonix/geonix.env` (see [Configuration](#configuration)):
+   ```
+   GEONIX_AFTER_DOWNLOADS=/path/to/geonix-music-player/tools/after_downloads.sh
+   ```
+   Optionally also export playlists on a timer (e.g. a systemd user timer that runs
+   `python3 /path/to/geonix-music-player/tools/sync_playlists.py` every few minutes),
+   so renamed or reordered playlists show up without a download.
+4. Publish Navidrome on your tailnet: `tailscale serve --bg --https=4533 http://127.0.0.1:4533`,
+   and in the phone app use the server `https://your-pc.your-tailnet.ts.net:4533`.
+
+## Configuration
+
+**Config file (optional).** `launch.sh`, `setup.sh` and `tools/sync_playlists.py` read
+`~/.config/geonix/geonix.env` if it exists (or the file named by `GEONIX_CONFIG`;
+`$XDG_CONFIG_HOME` is respected). One `KEY=VALUE` per line, `#` comments allowed,
+`~` and `$HOME` are expanded, and real environment variables always win over the file:
+
+```bash
+# ~/.config/geonix/geonix.env
+GEONIX_PORT=7802
+GEONIX_DATA_DIR=/home/you/.local/share/geonix
+GEONIX_MUSIC_DIR=/home/you/Music/Geonix
+# GEONIX_AFTER_DOWNLOADS=/home/you/geonix-music-player/tools/after_downloads.sh
+```
+
+Rerun `./setup.sh` after changing the port: the app has the address built in.
+(Windows: `launch.ps1` doesn't read the file; set the variables in your user
+environment instead.)
+
+**Where your data goes** with `launch.sh` / `launch.ps1` (port **7802**):
+
+| | Database + covers + `launch.log` | Music |
+|---|---|---|
+| Linux | `~/.local/share/geonix` | `~/Music/Geonix` |
+| macOS | `~/Library/Application Support/Geonix` | `~/Music/Geonix` |
+| Windows | `%LOCALAPPDATA%\Geonix` | `%USERPROFILE%\Music\Geonix` |
+
+The launchers start the backend, wait for `/api/health`, open the window and stop
+the backend again when you close it (if a backend is already running on that port,
+they just reuse it). Once a week they update yt-dlp in the background.
+
+**Environment variables** (read by the backend; the defaults below are the backend's own,
+the launchers set port and folders as shown above):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `GEONIX_PORT` | `7878` | Backend port (pass the same port to the app with `--dart-define=GEONIX_API=http://127.0.0.1:<port>`; `setup.sh` / `run.sh` do this for you) |
+| `GEONIX_DATA_DIR` | `~/.local/share/geonix` (macOS `~/Library/Application Support/geonix`, Windows `%LOCALAPPDATA%\geonix`) | Database and cover cache |
+| `GEONIX_MUSIC_DIR` | `~/Music/Geonix` | Where MP3s are saved |
+| `GEONIX_SYNC_PORT` | `7803` | Device-sync listener (Tailscale and localhost peers only) |
+| `GEONIX_TAILSCALE` | `tailscale` on `PATH`, then the standard macOS / Windows install paths | Tailscale CLI used to find devices when pairing |
+| `GEONIX_AFTER_DOWNLOADS` | *(none)* | Command run ~10 s after downloads or imports settle (see [Navidrome](#listening-on-the-phone-navidrome--amperfy)) |
+| `GEONIX_PYTHON` | `worker/.venv/bin/python` (Windows `worker\.venv\Scripts\python.exe`), else `python3` / `python` | Python used for the worker |
+| `GEONIX_WORKER` | `worker/worker.py` | Worker script |
+| `RUST_LOG` | `info` | Backend log level |
+| `GEONIX_WORKER_LOG` | `INFO` | Worker log level |
+
+## Troubleshooting
+
+- **Something failed at start:** look at `launch.log` in the data folder (table above).
+- **"Can't reach the Geonix backend":** start the app with `./launch.sh` (or the menu
+  entry); for development `cd backend && cargo run`.
+- **`/api/health` says `"worker":"stopped"`:** the worker venv is missing. Rerun
+  `./setup.sh`, or `python3 -m venv worker/.venv && worker/.venv/bin/pip install -r worker/requirements.txt`.
+- **Downloads fail with "Conversion to MP3 failed":** install `ffmpeg`.
+- **YouTube changed something (HTTP 403, extraction errors):** update yt-dlp with
+  `worker/.venv/bin/pip install -U yt-dlp` (the launchers also do this weekly).
+- **No sound (Linux):** media_kit needs `libmpv` (`sudo pacman -S mpv`,
+  `sudo apt install libmpv-dev mpv`, `sudo dnf install mpv mpv-devel`).
+- **The app talks to the wrong port** after you ran `./run.sh`: `run.sh` builds the app
+  for port 7878; run `./setup.sh` again to rebuild it for the launcher.
+- **Windows: `setup.ps1` cannot be loaded because running scripts is disabled:** start it with
+  `powershell -ExecutionPolicy Bypass -File .\setup.ps1`.
+- **Windows: worker stopped:** make sure `worker\.venv\Scripts\python.exe` exists (rerun `setup.ps1`);
+  the `python3` command on Windows is often only a Microsoft Store shortcut.
+  Logs: `%LOCALAPPDATA%\Geonix\launch.log` and `backend.err.log`.
+- **Device sync finds no device:** both devices must be online in the same tailnet
+  (`tailscale status`), have the app open, and allow port 7803 on the Tailscale interface.
+
+## How it works (for developers)
 
 | Part | Tech | Job |
 |---|---|---|
-| `app/` | Flutter (Dart 3, Linux desktop), Riverpod 3, media_kit | All screens and audio playback |
-| `backend/` | Rust: axum 0.7, tokio, rusqlite (bundled SQLite), tower-http | HTTP API on `127.0.0.1:7878`, library database, download queue, audio streaming |
+| `app/` | Flutter (Dart 3; Linux, macOS and Windows desktop), Riverpod 3, media_kit | All screens and audio playback |
+| `backend/` | Rust: axum 0.7, tokio, rusqlite (bundled SQLite), tower-http | HTTP API on `127.0.0.1`, library database, download queue, audio streaming, device sync |
 | `worker/` | Python 3.11+: yt-dlp, ytmusicapi, mutagen | YouTube Music search, downloads, ID3 tagging, recommendations |
 
-## How the parts talk
-
 ```
-Flutter app ──HTTP/JSON──▶ Rust backend (127.0.0.1:7878) ──JSON lines over stdin/stdout──▶ Python worker
+Flutter app ──HTTP/JSON──▶ Rust backend (127.0.0.1:<port>) ──JSON lines over stdin/stdout──▶ Python worker
      ▲                              │
-     └── audio + covers (HTTP) ─────┘   SQLite: ~/.local/share/geonix/library.db
-         progress (Server-Sent Events)  Music:  ~/Music/Geonix/<Artist>/<Album>/<Title>.mp3
+     └── audio + covers (HTTP) ─────┘   SQLite: <data dir>/library.db
+         progress (Server-Sent Events)  Music:  <music dir>/<Artist>/<Album>/<Title>.mp3
 ```
 
 - **The app talks only to the backend.** Even previews of songs you haven't
@@ -50,6 +308,8 @@ Flutter app ──HTTP/JSON──▶ Rust backend (127.0.0.1:7878) ──JSON li
   search. Its real stdout is reserved for the protocol: file descriptor 1 is
   redirected to stderr, so stray prints from libraries or ffmpeg can't corrupt
   a message. All logs go to stderr.
+- **Device sync** uses a second listener (`0.0.0.0:7803`) that serves only peer
+  routes and rejects anything that isn't a Tailscale or loopback address.
 
 ### Worker protocol
 
@@ -74,106 +334,7 @@ Every track uses one shape everywhere (worker results and API):
 ```
 Library songs also carry `play_count`, `last_played` and `added_at` (Unix ms).
 
-## Install (Arch Linux / CachyOS)
-
-```bash
-# Build tools, Python, ffmpeg (for MP3 conversion), libmpv (for playback), GTK
-sudo pacman -S --needed base-devel rustup python ffmpeg mpv gtk3 clang cmake ninja pkgconf curl
-rustup default stable
-
-# Flutter: from the AUR (or follow https://docs.flutter.dev/get-started/install/linux)
-yay -S flutter-bin
-flutter config --enable-linux-desktop
-flutter doctor        # the "Linux toolchain" line should be green
-```
-
-## Run
-
-```bash
-./run.sh
-```
-
-`run.sh` creates the worker venv (`worker/.venv`), builds the backend and the
-app in release mode, starts the backend, waits for `/api/health` and opens the
-app. Closing the app stops the backend and its worker.
-
-### Run the parts by hand (development)
-
-```bash
-# 1. Worker dependencies (once)
-python3 -m venv worker/.venv && worker/.venv/bin/pip install -r worker/requirements.txt
-
-# 2. Backend (starts the worker itself)
-cd backend && cargo run
-
-# 3. App, in another terminal
-cd app && flutter run -d linux
-```
-
-### Configuration (environment variables)
-
-| Variable | Default | Meaning |
-|---|---|---|
-| `GEONIX_PORT` | `7878` | Backend port (pass the same port to the app with `--dart-define=GEONIX_API=http://127.0.0.1:<port>`; `run.sh` does this for you) |
-| `GEONIX_DATA_DIR` | `~/.local/share/geonix` | Database and cover cache |
-| `GEONIX_MUSIC_DIR` | `~/Music/Geonix` | Where MP3s are saved |
-| `GEONIX_PYTHON` | `worker/.venv/bin/python`, else `python3` | Python used for the worker |
-| `GEONIX_WORKER` | `worker/worker.py` | Worker script |
-| `RUST_LOG` | `info` | Backend log level |
-| `GEONIX_WORKER_LOG` | `INFO` | Worker log level |
-
-## Tests
-
-```bash
-cd backend && cargo test && cargo clippy --all-targets      # 13 tests: database, playlist ordering, worker protocol
-cd worker  && .venv/bin/pip install -r requirements-dev.txt && .venv/bin/python -m pytest   # 23 tests, no network
-cd app     && flutter analyze && flutter test               # widget tests + palette/format tests
-```
-
-## Features
-
-- **Search** YouTube Music for songs only; videos, podcasts and user uploads are filtered out.
-  Click a result to preview it, or use the download button.
-- **Playlist import:** paste a YouTube or YouTube Music playlist link into
-  Search to preview it, then "Download all". A local playlist with the same
-  name and order appears immediately and fills up as songs finish downloading.
-- **Download queue:** at most 3 downloads at once, with live progress and speed
-  over Server-Sent Events. Failed downloads show the reason and a Retry
-  button. Songs already in your library are skipped. Downloads that were
-  running when the app quit are marked as failed on the next start, so you can retry them.
-- **Tagged MP3s:** title, artist and album are written as ID3 tags, with embedded cover art.
-- **Library:** Songs, Artists, Albums and Playlists views, an instant text
-  filter, and sorting by date added, title, artist, album, most played or
-  recently played. Play counts and the last-played time are tracked.
-- **Playlists:** create, rename, delete, add or remove songs, and reorder by
-  drag and drop. Covers are a 2×2 mosaic of the first four songs. Deleting a
-  playlist never deletes files.
-- **Player:** play/pause, next, previous, seek, volume, shuffle, and repeat
-  (off/all/one). The "Up next" queue can be reordered, edited and jumped
-  through. A glass player bar is always visible, and a full-screen Now Playing
-  view has a gradient taken from the cover's colors.
-- **For You:** the Home screen has Recently played, Your top songs,
-  Recommended for you and "Because you listened to …". The Discover Mix is
-  rebuilt with a button and automatically once a day; preview or download its
-  songs one by one or all at once.
-- **Look:** dark theme by default plus a light theme. The accent color is
-  taken from the playing song's cover and fades smoothly. Hover animations,
-  page transitions, a morphing play button, loading skeletons and friendly
-  empty states. Plus Jakarta Sans font. The window's minimum size is 1000×650.
-- **Keyboard:** Space toggles play/pause, Ctrl+→ and Ctrl+← skip to the
-  next or previous song, Ctrl+F opens Search. Shortcuts are ignored while you
-  type in a text field.
-
-### How recommendations work
-
-The worker takes up to 10 seed songs: your 5 most played and your 5 most
-recently added. For each seed it asks YouTube Music for its radio (the songs
-it would play next). Songs found through several seeds score highest, and an
-earlier position in a seed's list breaks ties. Songs already in your library
-are removed, and no artist may fill more than 4 spots. Each recommendation
-remembers which seed found it, which powers "Because you listened to …".
-
-## REST API
+### REST API
 
 All errors return `{"error": "message"}` with a 400, 404, 500 or 503 status.
 CORS allows `localhost` and `127.0.0.1` origins.
@@ -182,11 +343,13 @@ CORS allows `localhost` and `127.0.0.1` origins.
 |---|---|---|
 | GET | `/api/health` | `{"status":"ok","worker":"running"}` |
 | GET | `/api/search?q=&limit=` | Search YouTube Music (songs only) |
+| GET | `/api/resolve?url=&as=` | Detect what a YouTube link is (song or playlist) for the phone page |
 | GET | `/api/tracks?sort=&q=` | Library songs. `sort`: `added` (default), `title`, `artist`, `album`, `plays`, `recent`, `duration` |
 | GET | `/api/tracks/{id}` | One song |
 | GET | `/api/tracks/{id}/stream` | Audio with `Range` support (local file, or a proxied preview) |
 | GET | `/api/tracks/{id}/cover` | Cover image (embedded cover or cached thumbnail) |
-| POST | `/api/tracks/{id}/played` | Increase the play count |
+| GET | `/api/tracks/{id}/lyrics` | Lyrics (synced when available) |
+| POST | `/api/tracks/{id}/played` | Increase the play count (ignored while private listening is on) |
 | DELETE | `/api/tracks/{id}?delete_file=true` | Remove from the library (and optionally delete the file) |
 | GET | `/api/artists` · `/api/albums` | Grouped views |
 | GET / POST | `/api/playlists` | List / create `{"name": "..."}` |
@@ -197,48 +360,249 @@ CORS allows `localhost` and `127.0.0.1` origins.
 | POST | `/api/downloads` | `{"video_id": "..."}` or `{"playlist_url": "..."}` |
 | GET | `/api/downloads` | Queue with status and progress |
 | POST | `/api/downloads/{id}/retry` | Retry a failed download |
+| DELETE | `/api/downloads/{id}` · POST `/api/downloads/clear` | Remove one / clear finished downloads |
 | GET | `/api/downloads/events` | Server-Sent Events: `download` events carry the download JSON; `resync` means re-fetch the list |
 | GET | `/api/recommendations?limit=` | "For You" list |
 | POST | `/api/recommendations/refresh` | Rebuild recommendations and the Discover Mix |
-| GET | `/api/playlist-info?url=` | *(extra)* Preview a playlist before importing it |
+| GET | `/api/playlist-info?url=` | Preview a playlist before importing it |
+| GET / PUT | `/api/settings/private-listening` | Private listening on/off |
+| GET | `/api/sync/devices` | This device (name, pairing code) and the paired devices |
+| POST | `/api/sync/code` · `/api/sync/pair` · `/api/sync/run` | New code / pair with a code / sync now |
+| DELETE | `/api/sync/devices/{id}` | Forget a paired device |
 
-## Project layout
+### Project layout
 
 ```
-geonix_music_player/
-├── run.sh                    build + start everything
+geonix-music-player/
+├── setup.sh · launch.sh      build once / start (Linux, macOS)
+├── setup.ps1 · launch.ps1    build once / start (Windows)
+├── run.sh                    development: build + start on port 7878
+├── tools/                    config loader, optional Navidrome / phone helpers
 ├── backend/                  Rust
+│   ├── web/                  phone page (embedded into the binary)
 │   └── src/
 │       ├── main.rs           startup, config, shutdown
 │       ├── db.rs             SQLite schema, migrations, queries (+ tests)
 │       ├── worker.rs         spawns and supervises the Python worker (+ tests)
 │       ├── downloads.rs      queue (3 parallel), SSE broadcast, playlist import
+│       ├── sync.rs           device pairing and sync between backends
+│       ├── resolve.rs        link detection for the phone page
 │       ├── models.rs         shared structs
 │       ├── error.rs          JSON errors
-│       └── routes/           mod (router, health, search), tracks, playlists, downloads, recommendations
+│       └── routes/           router, tracks, playlists, downloads, recommendations, sync, resolve, web
 ├── worker/                   Python
 │   ├── worker.py             protocol loop
 │   ├── ytm.py                search, playlist info, related songs, stream URLs
 │   ├── downloader.py         yt-dlp + mutagen tagging
 │   ├── recommender.py        taste profile + ranking
 │   └── tests/                pytest (no network)
-└── app/                      Flutter
+└── app/                      Flutter (linux/, macos/, windows/ runners)
     └── lib/
         ├── main.dart, theme.dart
         ├── api/client.dart   HTTP + SSE client
-        ├── models/           Track, Playlist, Download, Artist/Album
-        ├── state/            Riverpod providers, player controller, cover palette, actions
+        ├── models/           Track, Playlist, Download, Artist/Album, sync devices
+        ├── state/            Riverpod providers, player controller, cover palette, actions, sync
         ├── screens/          shell, home, search, library, playlist, downloads, now playing, artist/album
-        └── widgets/          player bar, controls, seek bar, sidebar, queue, track tile, cards, skeletons…
+        └── widgets/          player bar, controls, seek bar, sidebar, queue, devices dialog, track tile, cards…
 ```
 
-## Troubleshooting
+### Running the parts by hand
 
-- **"Can't reach the Geonix backend":** start it with `./run.sh` or `cd backend && cargo run`.
-- **`/api/health` says `"worker":"stopped"`:** the worker venv is missing.
-  Run `python3 -m venv worker/.venv && worker/.venv/bin/pip install -r worker/requirements.txt`.
-- **Downloads fail with "Conversion to MP3 failed":** install `ffmpeg`.
-- **No sound:** media_kit needs `libmpv` (`sudo pacman -S mpv`).
-- **YouTube changed something:** update yt-dlp with `worker/.venv/bin/pip install -U yt-dlp`.
+```bash
+# 1. Worker dependencies (once)
+python3 -m venv worker/.venv && worker/.venv/bin/pip install -r worker/requirements.txt
 
-Only download music you have the right to download.
+# 2. Backend (starts the worker itself; port 7878, data in ~/.local/share/geonix)
+cd backend && cargo run
+
+# 3. App, in another terminal (or -d macos / -d windows)
+cd app && flutter run -d linux
+```
+
+`./run.sh` (Linux and macOS) does all three in release mode on port 7878 and stops
+the backend when the window closes. It overwrites the app build, so run `./setup.sh`
+again afterwards before using `./launch.sh`.
+
+### Tests
+
+```bash
+cd backend && cargo test && cargo clippy --all-targets       # database, sync, worker protocol
+cd worker  && .venv/bin/pip install -r requirements-dev.txt && .venv/bin/python -m pytest   # no network
+cd app     && flutter analyze && flutter test                # widget, palette, format and sync tests
+```
+
+## Getting started / Installation
+
+Every platform needs the same things: **Flutter** (the app), **Rust** (the backend),
+**Python 3.11+** (the worker) and **ffmpeg** (MP3 conversion), plus on Linux the
+Flutter desktop build tools (clang, cmake, ninja, pkg-config, GTK 3) and **libmpv**
+for playback. `setup.sh` / `setup.ps1` check all of that first and print the exact
+install command for your system if something is missing, then create the Python venv,
+build the backend and the app in release mode. Building the first time takes a few minutes.
+
+| | Setup (once, and after every update) | Start |
+|---|---|---|
+| Linux / macOS | `./setup.sh` | `./launch.sh` (or the menu entry) |
+| Windows | `powershell -ExecutionPolicy Bypass -File .\setup.ps1` | Start Menu → **Music Player** (or `launch.ps1`) |
+
+> [!WARNING]
+> The app is developed and used on Linux. The macOS and Windows builds and scripts were
+> written to work there but have **not been tested on real macOS or Windows hardware**
+> yet. Reports and fixes are welcome.
+
+### macOS (12 Monterey or newer, Apple Silicon or Intel)
+
+1. Install **Xcode** from the App Store (Flutter needs the full Xcode), then accept it:
+   ```bash
+   xcode-select --install
+   sudo xcodebuild -runFirstLaunch
+   sudo xcodebuild -license accept
+   ```
+2. Install [Homebrew](https://brew.sh), then the tools:
+   ```bash
+   brew install --cask flutter
+   brew install python@3.12 ffmpeg cocoapods git
+   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh   # Rust; then open a new terminal
+   ```
+3. Get the code:
+   ```bash
+   git clone https://github.com/danielaufnahme-cmd/geonix-music-player.git
+   cd geonix-music-player
+   ```
+4. Build it:
+   ```bash
+   ./setup.sh
+   ```
+5. Start it:
+   ```bash
+   ./launch.sh
+   ```
+
+Playback libraries (libmpv) are bundled into the app by media_kit; nothing else to install.
+
+### Windows 10 / 11
+
+1. Open **PowerShell** and install the tools:
+   ```powershell
+   winget install -e --id Git.Git
+   winget install -e --id Python.Python.3.12
+   winget install -e --id Rustlang.Rustup
+   winget install -e --id Gyan.FFmpeg
+   winget install -e --id Microsoft.VisualStudio.2022.BuildTools --override "--wait --passive --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
+   ```
+2. Install **Flutter**: download the Windows zip from
+   <https://docs.flutter.dev/get-started/install/windows/desktop>, unpack it to e.g.
+   `C:\src\flutter` and add `C:\src\flutter\bin` to your user `PATH`.
+3. Turn on **Developer Mode** (Flutter plugins need symlinks):
+   ```powershell
+   start ms-settings:developers
+   ```
+4. Close and reopen PowerShell (so `PATH` picks up everything), then:
+   ```powershell
+   rustup default stable
+   git clone https://github.com/danielaufnahme-cmd/geonix-music-player.git
+   cd geonix-music-player
+   ```
+5. Build it (also adds a **Music Player** Start Menu shortcut; skip that with `-NoShortcut`):
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File .\setup.ps1
+   ```
+6. Start it from the Start Menu, or:
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File .\launch.ps1
+   ```
+
+### Arch Linux / CachyOS / Manjaro
+
+1. Install the tools (Flutter comes from the AUR; any AUR helper works):
+   ```bash
+   sudo pacman -S --needed base-devel git curl rustup python ffmpeg mpv gtk3 clang cmake ninja pkgconf
+   rustup default stable
+   yay -S flutter-bin
+   ```
+2. Get the code:
+   ```bash
+   git clone https://github.com/danielaufnahme-cmd/geonix-music-player.git
+   cd geonix-music-player
+   ```
+3. Build it (add `--desktop-entry` to get an app-menu entry):
+   ```bash
+   ./setup.sh
+   ```
+4. Start it:
+   ```bash
+   ./launch.sh
+   ```
+
+### Debian / Ubuntu / Linux Mint / Pop!_OS
+
+1. Install the tools:
+   ```bash
+   sudo apt update
+   sudo apt install build-essential git curl clang cmake ninja-build pkg-config libgtk-3-dev \
+     libmpv-dev mpv ffmpeg python3 python3-venv
+   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh   # Rust; then open a new terminal
+   sudo snap install flutter --classic                               # or Flutter by hand, see below
+   ```
+   Python must be 3.11 or newer (`python3 --version`; Debian 12, Ubuntu 24.04 and newer are fine).
+2. Get the code:
+   ```bash
+   git clone https://github.com/danielaufnahme-cmd/geonix-music-player.git
+   cd geonix-music-player
+   ```
+3. Build it (add `--desktop-entry` to get an app-menu entry):
+   ```bash
+   ./setup.sh
+   ```
+4. Start it:
+   ```bash
+   ./launch.sh
+   ```
+
+### Fedora
+
+1. Install the tools:
+   ```bash
+   sudo dnf install gcc-c++ git curl clang cmake ninja-build pkgconf-pkg-config gtk3-devel \
+     mpv mpv-devel ffmpeg-free python3
+   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh   # Rust; then open a new terminal
+   ```
+   Then install Flutter by hand (below). `ffmpeg-free` can encode MP3; the full `ffmpeg`
+   from RPM Fusion works too.
+2. Get the code:
+   ```bash
+   git clone https://github.com/danielaufnahme-cmd/geonix-music-player.git
+   cd geonix-music-player
+   ```
+3. Build it (add `--desktop-entry` to get an app-menu entry):
+   ```bash
+   ./setup.sh
+   ```
+4. Start it:
+   ```bash
+   ./launch.sh
+   ```
+
+### Other Linux distributions, Flutter by hand
+
+Install the same tools with your package manager (`./setup.sh --check` lists what is
+missing). Flutter by hand works on any distro (it also needs `unzip`, `xz` and `zip`):
+
+```bash
+git clone https://github.com/flutter/flutter.git -b stable ~/flutter
+echo 'export PATH="$HOME/flutter/bin:$PATH"' >> ~/.bashrc && export PATH="$HOME/flutter/bin:$PATH"
+flutter doctor        # the "Linux toolchain" line should be green
+```
+
+### After installing
+
+- **Updating:** `git pull` and run the setup script again.
+- **Menu entry (Linux):** `./setup.sh --desktop-entry` writes
+  `~/.local/share/applications/geonix.desktop` pointing at `launch.sh` in your clone
+  (without a flag, setup asks when run in a terminal). `--no-desktop-entry` never asks.
+- **Check only:** `./setup.sh --check` (or `setup.ps1 -Check`) only checks the prerequisites.
+- Your settings, folders and ports: see [Configuration](#configuration).
+
+## License
+
+MIT, see [LICENSE](LICENSE).

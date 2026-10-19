@@ -9,12 +9,20 @@
 //!   GEONIX_MUSIC_DIR  where MP3s are saved (default ~/Music/Geonix)
 //!   GEONIX_PYTHON     python interpreter (default worker/.venv/bin/python, else python3)
 //!   GEONIX_WORKER     path to worker.py (default ../worker/worker.py next to this crate)
+//!   GEONIX_AFTER_DOWNLOADS  shell command run ~10 s after downloads/imports settle
+//!                     (e.g. export playlists and rescan the phone music server)
+//!   GEONIX_SYNC_PORT  device-sync listener on 0.0.0.0 (default 7803; only
+//!                     Tailscale and loopback addresses are served)
+//!   GEONIX_TAILSCALE  path to the tailscale CLI (default: PATH, then the
+//!                     usual macOS / Windows install locations)
 
 mod db;
 mod downloads;
 mod error;
 mod models;
+mod resolve;
 mod routes;
+mod sync;
 mod worker;
 
 use std::collections::HashMap;
@@ -25,7 +33,7 @@ use std::sync::{Arc, Mutex};
 use tracing_subscriber::EnvFilter;
 
 use crate::db::Db;
-use crate::downloads::DownloadManager;
+use crate::downloads::{AfterDownloads, DownloadManager};
 use crate::routes::AppState;
 use crate::worker::{Worker, WorkerConfig};
 
@@ -57,7 +65,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let data_dir = env_path("GEONIX_DATA_DIR").unwrap_or_else(|| {
-        dirs::data_dir().unwrap_or_else(|| home().join(".local").join("share")).join("geonix")
+        // data_local_dir: ~/.local/share on Linux (same as before), Library/Application
+        // Support on macOS, AppData\\Local (not Roaming) on Windows.
+        dirs::data_local_dir().unwrap_or_else(|| home().join(".local").join("share")).join("geonix")
     });
     let music_dir = env_path("GEONIX_MUSIC_DIR").unwrap_or_else(|| home().join("Music").join("Geonix"));
     let covers_dir = data_dir.join("covers");
@@ -65,6 +75,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::fs::create_dir_all(dir)?;
     }
     let port: u16 = std::env::var("GEONIX_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(7878);
+
+    // Bind first: if another backend already owns the port (e.g. the desktop
+    // app's), exit before touching its database or its running downloads.
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let listener = tokio::net::TcpListener::bind(addr).await?;
 
     let db = Arc::new(Db::open(&data_dir.join("library.db"))?);
     let interrupted = db.fail_interrupted_downloads()?;
@@ -85,8 +100,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .connect_timeout(std::time::Duration::from_secs(15))
         .build()?;
 
+    let downloads = DownloadManager::new(
+        db.clone(),
+        worker.clone(),
+        music_dir.clone(),
+        covers_dir.clone(),
+        std::env::var("GEONIX_AFTER_DOWNLOADS").ok().filter(|c| !c.trim().is_empty()).map(AfterDownloads::spawn),
+    );
+
+    // Device sync listener. Failing to bind it only disables sync.
+    let sync_port: u16 = std::env::var("GEONIX_SYNC_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(sync::DEFAULT_SYNC_PORT);
+    let sync_listener = match tokio::net::TcpListener::bind(SocketAddr::from(([0, 0, 0, 0], sync_port))).await {
+        Ok(l) => Some(l),
+        Err(e) => {
+            tracing::warn!("device sync disabled: cannot listen on port {sync_port}: {e}");
+            None
+        }
+    };
+    let sync = sync::SyncManager::new(db.clone(), music_dir.clone(), downloads.clone(), sync_port)
+        .map_err(|e| e.to_string())?;
+
     let state = AppState {
-        downloads: DownloadManager::new(db.clone(), worker.clone(), music_dir.clone(), covers_dir.clone()),
+        downloads,
+        sync,
         db,
         worker,
         http,
@@ -95,9 +134,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         recs_lock: Arc::new(tokio::sync::Mutex::new(())),
     };
     tokio::spawn(routes::recommendations::daily_refresh(state.clone()));
+    if let Some(l) = sync_listener {
+        tracing::info!("device sync on 0.0.0.0:{sync_port} (Tailscale and loopback only)");
+        let app = routes::sync::peer_router(state.clone()).into_make_service_with_connect_info::<SocketAddr>();
+        tokio::spawn(async move {
+            if let Err(e) = axum::serve(l, app).await {
+                tracing::error!("device sync listener stopped: {e}");
+            }
+        });
+    }
 
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
-    let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!("Geonix backend on http://{addr}  data: {}  music: {}", data_dir.display(), music_dir.display());
     axum::serve(listener, routes::router(state))
         .with_graceful_shutdown(shutdown_signal())

@@ -10,6 +10,7 @@ import '../models/lyrics.dart';
 import '../models/library_group.dart';
 import '../models/playlist.dart';
 import '../models/track.dart';
+import 'sync.dart';
 
 final apiProvider = Provider<ApiClient>((ref) => ApiClient());
 
@@ -216,7 +217,9 @@ class DownloadsController extends Notifier<List<Download>> {
     _sub?.cancel();
     _sub = ref.read(apiProvider).downloadEvents().listen(
       (event) {
-        if (event.resync) {
+        if (event.sync != null) {
+          ref.read(syncProvider.notifier).onEvent(event.sync!);
+        } else if (event.resync) {
           _load();
         } else if (event.download != null) {
           _apply(event.download!);

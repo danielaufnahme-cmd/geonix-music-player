@@ -303,6 +303,7 @@ dependencies = [
  "axum",
  "dirs",
  "futures-util",
+ "getrandom 0.2.17",
  "reqwest",
  "rusqlite",
  "serde",

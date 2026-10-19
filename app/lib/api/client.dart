@@ -7,6 +7,7 @@ import '../models/download.dart';
 import '../models/lyrics.dart';
 import '../models/library_group.dart';
 import '../models/playlist.dart';
+import '../models/sync.dart';
 import '../models/track.dart';
 
 /// Backend address. Override with `--dart-define=GEONIX_API=http://127.0.0.1:7979`.
@@ -25,12 +26,21 @@ class ApiException implements Exception {
 
 /// One message from `GET /api/downloads/events`.
 class DownloadEvent {
-  const DownloadEvent.update(Download this.download) : resync = false;
+  const DownloadEvent.update(Download this.download)
+      : resync = false,
+        sync = null;
   const DownloadEvent.resync()
       : download = null,
-        resync = true;
+        resync = true,
+        sync = null;
+
+  /// Device sync progress (SSE event type `sync`).
+  const DownloadEvent.sync(SyncEvent this.sync)
+      : download = null,
+        resync = false;
   final Download? download;
   final bool resync;
+  final SyncEvent? sync;
 }
 
 /// Talks to the Rust backend. The app never contacts anything else.
@@ -51,12 +61,12 @@ class ApiClient {
     return Uri.parse('$baseUrl$path').replace(queryParameters: q.isEmpty ? null : q);
   }
 
-  Future<dynamic> _send(String method, String path, {Object? body, Map<String, String?>? query}) async {
+  /// [json] sends `Content-Type: application/json` even without a body: the
+  /// backend requires it on settings/sync changes (CSRF protection).
+  Future<dynamic> _send(String method, String path, {Object? body, Map<String, String?>? query, bool json = false}) async {
     final req = http.Request(method, _uri(path, query));
-    if (body != null) {
-      req.headers['content-type'] = 'application/json';
-      req.body = jsonEncode(body);
-    }
+    if (body != null || json) req.headers['content-type'] = 'application/json';
+    if (body != null) req.body = jsonEncode(body);
     final http.Response res;
     try {
       res = await http.Response.fromStream(await _http.send(req)).timeout(const Duration(minutes: 3));
@@ -87,8 +97,11 @@ class ApiClient {
   Future<List<Track>> tracks({String? sort, String? q}) async =>
       _tracks(await _send('GET', '/api/tracks', query: {'sort': sort, 'q': q}));
 
-  Future<Track> played(String videoId) async =>
-      Track.fromJson(await _send('POST', '/api/tracks/$videoId/played') as Map<String, dynamic>);
+  /// Count a play. Returns null when nothing was recorded (private listening: 204).
+  Future<Track?> played(String videoId) async {
+    final j = await _send('POST', '/api/tracks/$videoId/played');
+    return j is Map<String, dynamic> ? Track.fromJson(j) : null;
+  }
 
   Future<void> deleteTrack(String videoId, {bool deleteFile = false}) =>
       _send('DELETE', '/api/tracks/$videoId', query: {'delete_file': deleteFile ? 'true' : null});
@@ -180,6 +193,37 @@ class ApiClient {
   Future<List<Track>> refreshRecommendations() async =>
       _tracks(await _send('POST', '/api/recommendations/refresh'));
 
+  // ------------------------------------------------------------ device sync
+
+  Future<SyncStatus> syncDevices() async =>
+      SyncStatus.fromJson(await _send('GET', '/api/sync/devices') as Map<String, dynamic>);
+
+  /// Make a new pairing code for this device.
+  Future<ThisDevice> newSyncCode() async =>
+      ThisDevice.fromJson(await _send('POST', '/api/sync/code', json: true) as Map<String, dynamic>);
+
+  /// Pair with the device showing [code] (found over Tailscale, or at [address]).
+  Future<SyncDevice> pairDevice(String code, {String? address}) async => SyncDevice.fromJson(await _send(
+        'POST',
+        '/api/sync/pair',
+        body: {'code': code, if (address != null && address.isNotEmpty) 'address': address},
+      ) as Map<String, dynamic>);
+
+  Future<void> removeDevice(String id) => _send('DELETE', '/api/sync/devices/${Uri.encodeComponent(id)}', json: true);
+
+  /// Start syncing with all online paired devices (or just [deviceId]).
+  /// Progress arrives as `sync` events on [downloadEvents].
+  Future<void> runSync({String? deviceId}) => _send('POST', '/api/sync/run', body: {'device_id': ?deviceId});
+
+  // ------------------------------------------------------ private listening
+
+  Future<bool> privateListening() async =>
+      (await _send('GET', '/api/settings/private-listening') as Map<String, dynamic>)['enabled'] == true;
+
+  Future<bool> setPrivateListening(bool enabled) async =>
+      (await _send('PUT', '/api/settings/private-listening', body: {'enabled': enabled})
+          as Map<String, dynamic>)['enabled'] == true;
+
   /// Server-Sent Events stream of download changes. Ends when the
   /// connection drops; callers reconnect.
   Stream<DownloadEvent> downloadEvents() async* {
@@ -196,6 +240,8 @@ class ApiClient {
             yield DownloadEvent.update(Download.fromJson(jsonDecode(data.toString()) as Map<String, dynamic>));
           } else if (event == 'resync') {
             yield const DownloadEvent.resync();
+          } else if (event == 'sync' && data.isNotEmpty) {
+            yield DownloadEvent.sync(SyncEvent.fromJson(jsonDecode(data.toString()) as Map<String, dynamic>));
           }
           event = null;
           data.clear();

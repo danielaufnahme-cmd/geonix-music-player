@@ -52,6 +52,11 @@ def test_extract_playlist_id_rejects_bad_links(url):
 def test_safe_paths_and_speed():
     assert downloader.safe_name('AC/DC: "Live"?') == "AC_DC_ _Live__"
     assert downloader.safe_name("...") == "Unknown"
+    # Names Windows can't store: device names and a trailing dot after cutting.
+    assert downloader.safe_name("con") == "_con"
+    assert downloader.safe_name("NUL.mp3") == "_NUL.mp3"
+    assert downloader.safe_name("Console") == "Console"
+    assert downloader.safe_name("a" * 119 + ". tail") == "a" * 119
     assert downloader.human_speed(1_258_291) == "1.2MiB/s"
     assert downloader.human_speed(None) is None
 
@@ -84,3 +89,47 @@ def test_each_retry_uses_different_player_clients():
     clients = [tuple(attempt_options(base, n)["extractor_args"]["youtube"]["player_client"]) for n in range(2, MAX_ATTEMPTS + 1)]
     assert len(set(clients)) == len(clients) == MAX_ATTEMPTS - 1
     assert base == {"format": "bestaudio/best"}, "base options are not mutated"
+
+
+def test_album_browse_id_detection():
+    from ytm import extract_album_browse_id
+
+    assert extract_album_browse_id("https://music.youtube.com/browse/MPREb_4pL8gzRtw1p") == "MPREb_4pL8gzRtw1p"
+    assert extract_album_browse_id("https://music.youtube.com/playlist?list=OLAK5uy_x") is None
+
+
+def test_album_tracks_inherit_album_name_and_cover(monkeypatch):
+    import ytm
+
+    class Fake:
+        def get_album(self, browse_id):
+            return {
+                "title": "Discovery",
+                "artists": [{"name": "Daft Punk"}],
+                "thumbnails": [{"url": "https://img/cover=w120-h120", "width": 120}],
+                "tracks": [
+                    {"videoId": "aaaaaaaaaaa", "title": "One More Time", "artists": None, "album": None, "duration": "5:20"},
+                    {"videoId": "bbbbbbbbbbb", "title": "Gone", "isAvailable": False},
+                    {"videoId": "aaaaaaaaaaa", "title": "dupe"},
+                ],
+            }
+
+    monkeypatch.setattr(ytm, "client", lambda: Fake())
+    info = ytm.playlist_info("https://music.youtube.com/browse/MPREb_abc")
+    assert info["title"] == "Discovery"
+    assert [t["video_id"] for t in info["tracks"]] == ["aaaaaaaaaaa"]
+    t = info["tracks"][0]
+    assert t["album"] == "Discovery" and t["artist"] == "Daft Punk" and t["duration_sec"] == 320
+    assert t["thumbnail_url"].startswith("https://img/cover")
+
+
+def test_song_info_uses_watch_playlist(monkeypatch):
+    import ytm
+
+    class Fake:
+        def get_watch_playlist(self, videoId, limit):
+            return {"tracks": [{"videoId": videoId, "title": "Song", "artists": [{"name": "A"}], "length": "3:00"}]}
+
+    monkeypatch.setattr(ytm, "client", lambda: Fake())
+    t = ytm.song_info("ccccccccccc")
+    assert (t["title"], t["artist"], t["duration_sec"]) == ("Song", "A", 180)

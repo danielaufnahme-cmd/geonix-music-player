@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use serde_json::json;
-use tokio::sync::{broadcast, mpsc, Semaphore};
+use tokio::sync::{broadcast, mpsc, Notify, Semaphore};
 
 use crate::db::Db;
 use crate::error::{ApiError, ApiResult};
@@ -26,11 +26,13 @@ pub struct DownloadManager {
     events: broadcast::Sender<Download>,
     music_dir: PathBuf,
     covers_dir: PathBuf,
+    after: Option<AfterDownloads>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct PlaylistImport {
-    pub playlist_id: i64,
+    /// `None` for a "songs only" import, which doesn't touch any playlist.
+    pub playlist_id: Option<i64>,
     pub name: String,
     pub total: usize,
     pub queued: usize,
@@ -47,6 +49,51 @@ pub enum ImportTarget<'a> {
     New { name: Option<&'a str> },
     /// Append to an existing playlist, keeping its name and current songs.
     Existing(i64),
+    /// Only download the missing songs into the library; no playlist changes.
+    LibraryOnly,
+}
+
+/// Runs a shell command (`GEONIX_AFTER_DOWNLOADS`) once things have settled
+/// after downloads or imports, e.g. to export playlists and rescan the phone
+/// server. Bursts are coalesced: it runs `QUIET` after the last poke.
+#[derive(Clone)]
+pub struct AfterDownloads {
+    notify: Arc<Notify>,
+}
+
+impl AfterDownloads {
+    const QUIET: Duration = Duration::from_secs(10);
+
+    pub fn spawn(command: String) -> Self {
+        let notify = Arc::new(Notify::new());
+        let waiter = notify.clone();
+        tokio::spawn(async move {
+            loop {
+                waiter.notified().await;
+                // Wait until no new poke arrived for QUIET.
+                while tokio::time::timeout(Self::QUIET, waiter.notified()).await.is_ok() {}
+                let mut cmd = if cfg!(windows) {
+                    let mut c = tokio::process::Command::new("cmd");
+                    c.arg("/C");
+                    c
+                } else {
+                    let mut c = tokio::process::Command::new("sh");
+                    c.arg("-c");
+                    c
+                };
+                match cmd.arg(&command).status().await {
+                    Ok(st) if st.success() => tracing::info!("after-downloads hook finished"),
+                    Ok(st) => tracing::warn!("after-downloads hook exited with {st}"),
+                    Err(e) => tracing::warn!("after-downloads hook could not run: {e}"),
+                }
+            }
+        });
+        Self { notify }
+    }
+
+    pub fn poke(&self) {
+        self.notify.notify_one();
+    }
 }
 
 /// Result of placing imported songs into a playlist.
@@ -58,9 +105,22 @@ struct ImportPlan {
 }
 
 impl DownloadManager {
-    pub fn new(db: Arc<Db>, worker: Worker, music_dir: PathBuf, covers_dir: PathBuf) -> Self {
+    pub fn new(
+        db: Arc<Db>,
+        worker: Worker,
+        music_dir: PathBuf,
+        covers_dir: PathBuf,
+        after: Option<AfterDownloads>,
+    ) -> Self {
         let (events, _) = broadcast::channel(256);
-        Self { db, worker, permits: Arc::new(Semaphore::new(MAX_PARALLEL)), events, music_dir, covers_dir }
+        Self { db, worker, permits: Arc::new(Semaphore::new(MAX_PARALLEL)), events, music_dir, covers_dir, after }
+    }
+
+    /// Tell the after-downloads hook (if configured) that the library changed.
+    pub fn library_changed(&self) {
+        if let Some(after) = &self.after {
+            after.poke();
+        }
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<Download> {
@@ -191,6 +251,7 @@ impl DownloadManager {
                         }
                         d.status = "done".into();
                         d.progress = 100.0;
+                        self.library_changed();
                         d.title = done.track.title.clone();
                         d.artist = done.track.artist.clone();
                         if let Some(pid) = d.playlist_id {
@@ -237,20 +298,25 @@ impl DownloadManager {
         if info.tracks.is_empty() {
             return Err(ApiError::bad_request("that playlist has no available songs"));
         }
-        let (playlist_id, name) = match target {
+        let ids: Vec<String> = info.tracks.iter().map(|t| t.video_id.clone()).collect();
+        let (playlist_id, name, plan) = match target {
             ImportTarget::New { name } => {
                 let name = playlist_name(name, &info.title);
-                (self.db.create_playlist(&name, "imported", Some(url))?, name)
+                let id = self.db.create_playlist(&name, "imported", Some(url))?;
+                (Some(id), name, place_tracks(&self.db, id, &ids)?)
             }
-            ImportTarget::Existing(id) => (id, self.db.playlist(id)?.playlist.name),
+            ImportTarget::Existing(id) => {
+                let name = self.db.playlist(id)?.playlist.name;
+                (Some(id), name, place_tracks(&self.db, id, &ids)?)
+            }
+            ImportTarget::LibraryOnly => (None, info.title.clone(), missing_tracks(&self.db, &ids)?),
         };
-        let ids: Vec<String> = info.tracks.iter().map(|t| t.video_id.clone()).collect();
-        let plan = place_tracks(&self.db, playlist_id, &ids)?;
 
         let mut downloads = Vec::new();
         for id in &plan.to_download {
-            downloads.push(self.enqueue(id, Some(playlist_id))?);
+            downloads.push(self.enqueue(id, playlist_id)?);
         }
+        self.library_changed();
         Ok(PlaylistImport {
             playlist_id,
             name,
@@ -290,6 +356,24 @@ fn place_tracks(db: &Db, playlist_id: i64, ids: &[String]) -> ApiResult<ImportPl
             continue;
         }
         db.add_to_playlist(playlist_id, id)?;
+        if has_file(db.get_track(id)?.as_ref()) {
+            plan.in_library += 1;
+        } else {
+            plan.to_download.push(id.clone());
+        }
+    }
+    Ok(plan)
+}
+
+/// For "songs only": which songs (in order, without duplicates) still need
+/// downloading. No playlist is touched.
+fn missing_tracks(db: &Db, ids: &[String]) -> ApiResult<ImportPlan> {
+    let mut seen = std::collections::HashSet::new();
+    let mut plan = ImportPlan::default();
+    for id in ids {
+        if !seen.insert(id.as_str()) {
+            continue;
+        }
         if has_file(db.get_track(id)?.as_ref()) {
             plan.in_library += 1;
         } else {
@@ -386,6 +470,43 @@ mod tests {
         assert_eq!(again.already_in_playlist, 4);
         assert!(again.to_download.is_empty());
         assert_eq!(playlist_ids(&db, p), ["mine", "y1", "have", "y3"]);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn songs_only_import_touches_no_playlist() {
+        let dir = std::env::temp_dir().join(format!("geonix-import-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Db::open_in_memory().unwrap();
+        library_track(&db, &dir, "have");
+        remote_track(&db, "a");
+        remote_track(&db, "c");
+        let p = db.create_playlist("smal", "user", None).unwrap();
+        db.add_to_playlist(p, "have").unwrap();
+        let before = db.playlists().unwrap();
+
+        let plan = missing_tracks(&db, &["a", "have", "c", "a"].map(String::from)).unwrap();
+        assert_eq!(plan, ImportPlan { to_download: vec!["a".into(), "c".into()], in_library: 1, already_in_playlist: 0 });
+        assert_eq!(db.playlists().unwrap(), before, "playlists must be unchanged");
+        assert_eq!(playlist_ids(&db, p), ["have"]);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn songs_from_other_playlists_are_added_without_downloading_again() {
+        let dir = std::env::temp_dir().join(format!("geonix-import-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Db::open_in_memory().unwrap();
+        library_track(&db, &dir, "shared");
+        remote_track(&db, "new");
+        let other = db.create_playlist("big", "imported", None).unwrap();
+        db.add_to_playlist(other, "shared").unwrap();
+
+        let target = db.create_playlist("road trip", "user", None).unwrap();
+        let plan = place_tracks(&db, target, &["shared", "new"].map(String::from)).unwrap();
+        assert_eq!(playlist_ids(&db, target), ["shared", "new"]);
+        assert_eq!(playlist_ids(&db, other), ["shared"], "the other playlist keeps the song");
+        assert_eq!(plan, ImportPlan { to_download: vec!["new".into()], in_library: 1, already_in_playlist: 0 });
         std::fs::remove_dir_all(dir).ok();
     }
 

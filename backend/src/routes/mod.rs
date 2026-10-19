@@ -4,7 +4,10 @@
 pub mod downloads;
 pub mod playlists;
 pub mod recommendations;
+pub mod resolve;
+pub mod sync;
 pub mod tracks;
+pub mod web;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -41,6 +44,7 @@ pub struct AppState {
     pub db: Arc<Db>,
     pub worker: Worker,
     pub downloads: DownloadManager,
+    pub sync: crate::sync::SyncManager,
     pub http: reqwest::Client,
     pub covers_dir: PathBuf,
     pub stream_cache: Arc<Mutex<HashMap<String, StreamSource>>>,
@@ -57,7 +61,14 @@ pub fn router(state: AppState) -> Router {
         .allow_headers(tower_http::cors::Any);
 
     Router::new()
+        .route("/", get(web::index))
+        .route("/manifest.webmanifest", get(web::manifest))
+        .route("/sw.js", get(web::service_worker))
+        .route("/icon-192.png", get(web::icon_192))
+        .route("/icon-512.png", get(web::icon_512))
+        .route("/apple-touch-icon.png", get(web::apple_touch_icon))
         .route("/api/health", get(health))
+        .route("/api/resolve", get(resolve::resolve))
         .route("/api/search", get(search))
         .route("/api/playlist-info", get(downloads::playlist_info))
         .route("/api/tracks", get(tracks::list))
@@ -83,6 +94,20 @@ pub fn router(state: AppState) -> Router {
         .route("/api/downloads/:id/retry", post(downloads::retry))
         .route("/api/recommendations", get(recommendations::list))
         .route("/api/recommendations/refresh", post(recommendations::refresh))
+        .route(
+            "/api/settings/private-listening",
+            get(tracks::get_private_listening)
+                .put(tracks::put_private_listening)
+                .route_layer(axum::middleware::from_fn(require_json)),
+        )
+        .route("/api/sync/devices", get(sync::devices))
+        .route(
+            "/api/sync/devices/:id",
+            delete(sync::remove_device).route_layer(axum::middleware::from_fn(require_json)),
+        )
+        .route("/api/sync/code", post(sync::new_code).route_layer(axum::middleware::from_fn(require_json)))
+        .route("/api/sync/pair", post(sync::pair).route_layer(axum::middleware::from_fn(require_json)))
+        .route("/api/sync/run", post(sync::run).route_layer(axum::middleware::from_fn(require_json)))
         .layer(axum::middleware::from_fn(json_errors))
         .layer(cors)
         .with_state(state)
@@ -120,10 +145,34 @@ pub fn is_local_origin(origin: &str) -> bool {
     matches!(host, "localhost" | "127.0.0.1" | "[::1]")
 }
 
+/// Settings and device-sync changes must say `Content-Type: application/json`
+/// (even without a body). A web page can only send that after a CORS
+/// preflight, which `is_local_origin` refuses for other sites, so a page you
+/// visit can't pair devices, start syncs or flip settings behind your back.
+/// Reads (GET/HEAD) pass through.
+pub(crate) async fn require_json(req: Request, next: Next) -> Response {
+    if matches!(*req.method(), Method::GET | Method::HEAD | Method::OPTIONS) {
+        return next.run(req).await;
+    }
+    let is_json = req
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(';').next())
+        .is_some_and(|v| v.trim().eq_ignore_ascii_case("application/json"));
+    if is_json {
+        next.run(req).await
+    } else {
+        use axum::response::IntoResponse;
+        ApiError::status(axum::http::StatusCode::UNSUPPORTED_MEDIA_TYPE, "send Content-Type: application/json")
+            .into_response()
+    }
+}
+
 /// Errors produced outside our handlers (bad JSON body, bad query, unknown
 /// route, unsatisfiable Range) come as plain text; reshape them to the API's
 /// `{"error": "..."}` form, keeping status and headers like Content-Range.
-async fn json_errors(req: Request, next: Next) -> Response {
+pub(crate) async fn json_errors(req: Request, next: Next) -> Response {
     let res = next.run(req).await;
     let status = res.status();
     let is_json = res

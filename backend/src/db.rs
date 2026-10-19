@@ -88,6 +88,19 @@ const MIGRATIONS: &[&str] = &[
         fetched_at INTEGER NOT NULL
     );
     "#,
+    // 3: paired devices for backend-to-backend sync (settings live in `meta`)
+    r#"
+    CREATE TABLE IF NOT EXISTS peers (
+        id           TEXT PRIMARY KEY,
+        name         TEXT NOT NULL,
+        address      TEXT NOT NULL,
+        dns_name     TEXT,
+        token        TEXT NOT NULL,
+        last_sync_at INTEGER,
+        last_error   TEXT,
+        created_at   INTEGER NOT NULL
+    );
+    "#,
 ];
 
 const TRACK_COLS: &str = "video_id, title, artist, album, duration_sec, thumbnail_url, \
@@ -736,6 +749,194 @@ impl Db {
     }
 }
 
+/// A paired device (see `sync.rs`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Peer {
+    pub id: String,
+    pub name: String,
+    /// `ip:port` of its sync listener.
+    pub address: String,
+    pub dns_name: Option<String>,
+    /// Shared secret both sides send as `Authorization: Bearer`.
+    pub token: String,
+    pub last_sync_at: Option<i64>,
+    pub last_error: Option<String>,
+}
+
+const PEER_COLS: &str = "id, name, address, dns_name, token, last_sync_at, last_error";
+
+fn peer_from_row(r: &Row) -> rusqlite::Result<Peer> {
+    Ok(Peer {
+        id: r.get(0)?,
+        name: r.get(1)?,
+        address: r.get(2)?,
+        dns_name: r.get(3)?,
+        token: r.get(4)?,
+        last_sync_at: r.get(5)?,
+        last_error: r.get(6)?,
+    })
+}
+
+impl Db {
+    // ------------------------------------------------------------------ sync
+
+    pub fn peers(&self) -> rusqlite::Result<Vec<Peer>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(&format!("SELECT {PEER_COLS} FROM peers ORDER BY created_at"))?;
+        let rows = stmt.query_map([], peer_from_row)?;
+        rows.collect()
+    }
+
+    pub fn get_peer(&self, id: &str) -> rusqlite::Result<Option<Peer>> {
+        self.conn()
+            .query_row(&format!("SELECT {PEER_COLS} FROM peers WHERE id = ?1"), [id], peer_from_row)
+            .optional()
+    }
+
+    /// Store a newly paired device; pairing the same device again replaces
+    /// its name, address and token but keeps its sync history.
+    pub fn upsert_peer(&self, p: &Peer) -> rusqlite::Result<()> {
+        self.conn().execute(
+            "INSERT INTO peers (id, name, address, dns_name, token, last_sync_at, last_error, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, NULL, NULL, ?6)
+             ON CONFLICT(id) DO UPDATE SET name = excluded.name, address = excluded.address,
+                dns_name = COALESCE(excluded.dns_name, peers.dns_name), token = excluded.token,
+                last_error = NULL",
+            params![p.id, p.name, p.address, p.dns_name, p.token, now_ms()],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_peer(&self, id: &str) -> rusqlite::Result<bool> {
+        Ok(self.conn().execute("DELETE FROM peers WHERE id = ?1", [id])? > 0)
+    }
+
+    pub fn set_peer_address(&self, id: &str, address: &str, dns_name: Option<&str>) -> rusqlite::Result<()> {
+        self.conn().execute(
+            "UPDATE peers SET address = ?2, dns_name = COALESCE(?3, dns_name) WHERE id = ?1",
+            params![id, address, dns_name],
+        )?;
+        Ok(())
+    }
+
+    /// Record the outcome of a sync: success sets `last_sync_at` and clears
+    /// the error, failure only sets the error.
+    pub fn set_peer_sync_result(&self, id: &str, error: Option<&str>) -> rusqlite::Result<()> {
+        let conn = self.conn();
+        match error {
+            None => conn.execute(
+                "UPDATE peers SET last_sync_at = ?2, last_error = NULL WHERE id = ?1",
+                params![id, now_ms()],
+            )?,
+            Some(e) => conn.execute("UPDATE peers SET last_error = ?2 WHERE id = ?1", params![id, e])?,
+        };
+        Ok(())
+    }
+
+    /// Store a song received from a paired device: metadata from the peer,
+    /// the local file path; keeps local play history and cover.
+    pub fn upsert_synced_track(&self, t: &Track, file_path: &str) -> rusqlite::Result<()> {
+        self.conn().execute(
+            "INSERT INTO tracks (video_id, title, artist, album, duration_sec, thumbnail_url, file_path, added_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(video_id) DO UPDATE SET
+                title = excluded.title, artist = excluded.artist, album = excluded.album,
+                duration_sec = excluded.duration_sec, thumbnail_url = excluded.thumbnail_url,
+                file_path = excluded.file_path,
+                added_at = COALESCE(tracks.added_at, excluded.added_at)",
+            params![t.video_id, t.title, t.artist, t.album, t.duration_sec, t.thumbnail_url, file_path, now_ms()],
+        )?;
+        Ok(())
+    }
+
+    /// Every playlist except the generated Discover Mix, with its songs in order.
+    pub fn playlists_for_sync(&self) -> rusqlite::Result<Vec<(String, String, Vec<String>)>> {
+        let conn = self.conn();
+        let lists: Vec<(i64, String, String)> = {
+            let mut stmt = conn.prepare("SELECT id, name, kind FROM playlists WHERE kind != 'discover' ORDER BY id")?;
+            let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        let mut stmt =
+            conn.prepare("SELECT video_id FROM playlist_tracks WHERE playlist_id = ?1 ORDER BY position")?;
+        let mut out = Vec::new();
+        for (id, name, kind) in lists {
+            let ids = stmt.query_map([id], |r| r.get(0))?.collect::<rusqlite::Result<Vec<String>>>()?;
+            out.push((name, kind, ids));
+        }
+        Ok(out)
+    }
+
+    /// Additive playlist merge: find the playlist by name (never the Discover
+    /// Mix), create it if missing, then append the given songs it doesn't
+    /// have yet in the given order. Songs unknown locally are skipped; nothing
+    /// is ever removed. Returns how many songs were added (and whether the
+    /// playlist was created).
+    pub fn merge_playlist(&self, name: &str, kind: &str, video_ids: &[String]) -> rusqlite::Result<(usize, bool)> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        let existing: Option<i64> = tx
+            .query_row(
+                "SELECT id FROM playlists WHERE name = ?1 AND kind != 'discover' ORDER BY id LIMIT 1",
+                [name],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let known: Vec<&String> = {
+            let mut stmt = tx.prepare("SELECT 1 FROM tracks WHERE video_id = ?1")?;
+            let mut known = Vec::new();
+            for id in video_ids {
+                if stmt.exists([id])? {
+                    known.push(id);
+                }
+            }
+            known
+        };
+        let (id, created) = match existing {
+            Some(id) => (id, false),
+            None => {
+                let kind = if kind == "imported" { "imported" } else { "user" };
+                let now = now_ms();
+                tx.execute(
+                    "INSERT INTO playlists (name, kind, source_url, created_at, updated_at) VALUES (?1, ?2, NULL, ?3, ?3)",
+                    params![name, kind, now],
+                )?;
+                (tx.last_insert_rowid(), true)
+            }
+        };
+        let mut added = 0;
+        {
+            let mut ins = tx.prepare(
+                "INSERT OR IGNORE INTO playlist_tracks (playlist_id, video_id, position)
+                 VALUES (?1, ?2, (SELECT COALESCE(MAX(position), -1) + 1 FROM playlist_tracks WHERE playlist_id = ?1))",
+            )?;
+            for vid in known {
+                added += ins.execute(params![id, vid])?;
+            }
+        }
+        if added > 0 {
+            Self::touch_playlist(&tx, id)?;
+        }
+        tx.commit()?;
+        Ok((added, created))
+    }
+
+    #[cfg(test)]
+    pub fn count_plays(&self, video_id: &str) -> rusqlite::Result<i64> {
+        self.conn().query_row("SELECT COUNT(*) FROM plays WHERE video_id = ?1", [video_id], |r| r.get(0))
+    }
+
+    pub fn private_listening(&self) -> rusqlite::Result<bool> {
+        Ok(self.get_meta(PRIVATE_LISTENING_KEY)?.as_deref() == Some("1"))
+    }
+
+    pub fn set_private_listening(&self, enabled: bool) -> rusqlite::Result<()> {
+        self.set_meta(PRIVATE_LISTENING_KEY, if enabled { "1" } else { "0" })
+    }
+}
+
+pub const PRIVATE_LISTENING_KEY: &str = "private_listening";
+
 #[derive(Debug)]
 pub enum ReorderError {
     Mismatch,
@@ -966,6 +1167,88 @@ mod tests {
         let (json, found, _) = db.get_lyrics("v").unwrap().unwrap();
         assert_eq!(json, r#"{"lines":[1]}"#);
         assert!(found);
+    }
+
+    fn peer(id: &str) -> Peer {
+        Peer {
+            id: id.into(),
+            name: format!("dev-{id}"),
+            address: "100.64.0.2:7803".into(),
+            dns_name: Some("dev.tail.ts.net".into()),
+            token: "t1".into(),
+            last_sync_at: None,
+            last_error: None,
+        }
+    }
+
+    #[test]
+    fn peers_round_trip_and_repairing_updates() {
+        let db = Db::open_in_memory().unwrap();
+        db.upsert_peer(&peer("a")).unwrap();
+        db.set_peer_sync_result("a", None).unwrap();
+        let mut again = peer("a");
+        again.token = "t2".into();
+        again.address = "100.64.0.9:7803".into();
+        again.dns_name = None;
+        db.upsert_peer(&again).unwrap();
+        let p = db.get_peer("a").unwrap().unwrap();
+        assert_eq!(p.token, "t2");
+        assert_eq!(p.address, "100.64.0.9:7803");
+        assert_eq!(p.dns_name.as_deref(), Some("dev.tail.ts.net"), "kept when not rediscovered");
+        assert!(p.last_sync_at.is_some(), "re-pairing keeps the history");
+        db.set_peer_sync_result("a", Some("offline")).unwrap();
+        assert_eq!(db.get_peer("a").unwrap().unwrap().last_error.as_deref(), Some("offline"));
+        assert_eq!(db.peers().unwrap().len(), 1);
+        assert!(db.delete_peer("a").unwrap());
+        assert!(db.get_peer("a").unwrap().is_none());
+    }
+
+    #[test]
+    fn playlist_merge_is_additive_and_ordered_and_skips_discover() {
+        let db = db_with_library(5);
+        let discover = db.create_playlist("Discover Mix", "discover", None).unwrap();
+        db.set_playlist_tracks(discover, &["v0".to_string()]).unwrap();
+        let mine = db.create_playlist("Road", "user", None).unwrap();
+        db.set_playlist_tracks(mine, &["v3", "v1"].map(String::from)).unwrap();
+
+        // Peer order v0, v1, v4, unknown, v2: v1 is already there, unknown is skipped.
+        let peer_ids = ["v0", "v1", "v4", "unknown", "v2"].map(String::from);
+        assert_eq!(db.merge_playlist("Road", "user", &peer_ids).unwrap(), (3, false));
+        assert_eq!(ids(&db, mine), ["v3", "v1", "v0", "v4", "v2"]);
+        assert_eq!(db.merge_playlist("Road", "user", &peer_ids).unwrap(), (0, false), "second merge is a no-op");
+
+        // A peer playlist named like the Discover Mix becomes a normal playlist.
+        let (added, created) = db.merge_playlist("Discover Mix", "user", &["v2".to_string()]).unwrap();
+        assert_eq!((added, created), (1, true));
+        assert_eq!(ids(&db, discover), ["v0"], "the Discover Mix is never touched");
+
+        let synced = db.playlists_for_sync().unwrap();
+        assert!(synced.iter().all(|(_, kind, _)| kind != "discover"));
+        assert_eq!(synced[0], ("Road".to_string(), "user".to_string(), ids(&db, mine)));
+    }
+
+    #[test]
+    fn synced_track_keeps_play_history() {
+        let db = db_with_library(1);
+        db.record_play("v0").unwrap();
+        let mut t = track("v0", "New Title", "Artist");
+        t.play_count = 99;
+        db.upsert_synced_track(&t, "/music/new.mp3").unwrap();
+        let got = db.get_track("v0").unwrap().unwrap();
+        assert_eq!(got.play_count, 1);
+        assert_eq!(got.file_path.as_deref(), Some("/music/new.mp3"));
+        db.upsert_synced_track(&track("fresh", "F", "A"), "/music/f.mp3").unwrap();
+        assert!(db.get_track("fresh").unwrap().unwrap().downloaded);
+    }
+
+    #[test]
+    fn private_listening_setting_round_trip() {
+        let db = Db::open_in_memory().unwrap();
+        assert!(!db.private_listening().unwrap());
+        db.set_private_listening(true).unwrap();
+        assert!(db.private_listening().unwrap());
+        db.set_private_listening(false).unwrap();
+        assert!(!db.private_listening().unwrap());
     }
 
     #[test]

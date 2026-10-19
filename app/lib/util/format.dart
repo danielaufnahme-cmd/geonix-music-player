@@ -24,3 +24,13 @@ String greeting([DateTime? now]) {
   if (h < 18) return 'Good afternoon';
   return 'Good evening';
 }
+
+/// "just now", "5 min ago", "3 hr ago", "2 days ago", or the date.
+String formatAgo(DateTime t, [DateTime? now]) {
+  final d = (now ?? DateTime.now()).difference(t);
+  if (d.inMinutes < 1) return 'just now';
+  if (d.inHours < 1) return '${d.inMinutes} min ago';
+  if (d.inDays < 1) return '${d.inHours} hr ago';
+  if (d.inDays < 7) return '${plural(d.inDays, 'day')} ago';
+  return '${t.year}-${t.month.toString().padLeft(2, '0')}-${t.day.toString().padLeft(2, '0')}';
+}

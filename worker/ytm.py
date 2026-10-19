@@ -130,8 +130,70 @@ def extract_playlist_id(url: str) -> str:
     return playlist_id
 
 
+def extract_album_browse_id(url: str) -> str | None:
+    """The album id from a music.youtube.com/browse/MPREb… link, if it is one."""
+    match = re.search(r"/browse/(MPRE[A-Za-z0-9_-]+)", urlparse(url.strip()).path)
+    return match.group(1) if match else None
+
+
+def album_info(browse_id: str) -> dict[str, Any]:
+    """Title and songs of an album page; album tracks inherit its name and cover."""
+    data = client().get_album(browse_id)
+    title = data.get("title") or "Imported album"
+    cover = best_thumbnail(data.get("thumbnails"))
+    tracks: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in data.get("tracks") or []:
+        if item.get("isAvailable") is False:
+            continue
+        track = normalize_track(item)
+        if not track or track["video_id"] in seen:
+            continue
+        seen.add(track["video_id"])
+        track["album"] = track["album"] or title
+        track["thumbnail_url"] = track["thumbnail_url"] or cover
+        if track["artist"] == "Unknown artist":
+            track["artist"] = join_artists(data.get("artists")) or track["artist"]
+        tracks.append(track)
+    return {"title": title, "tracks": tracks}
+
+
+def song_info(video_id: str) -> dict[str, Any]:
+    """Metadata of one song (title, artist, album, duration, cover)."""
+    try:
+        data = client().get_watch_playlist(videoId=video_id, limit=1)
+        for item in data.get("tracks") or []:
+            if item.get("videoId") == video_id:
+                track = normalize_track(item)
+                if track:
+                    return track
+    except Exception as exc:  # noqa: BLE001 - fall back to yt-dlp below
+        log.info("ytmusicapi could not read song %s (%s); trying yt-dlp", video_id, exc)
+    import yt_dlp
+
+    opts = {"quiet": True, "no_warnings": True, "logger": log, "skip_download": True}
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(f"https://music.youtube.com/watch?v={video_id}", download=False) or {}
+    title = info.get("track") or info.get("title")
+    if not title:
+        raise ValueError("Couldn't find that song")
+    return {
+        "video_id": video_id,
+        "title": title,
+        "artist": info.get("artist") or ", ".join(info.get("artists") or []) or info.get("channel") or "Unknown artist",
+        "album": info.get("album") or "",
+        "duration_sec": int(info.get("duration") or 0),
+        "thumbnail_url": info.get("thumbnail") or "",
+        "file_path": None,
+        "downloaded": False,
+    }
+
+
 def playlist_info(url: str) -> dict[str, Any]:
-    """Title and songs (in order) of a playlist."""
+    """Title and songs (in order) of a playlist or an album page."""
+    album = extract_album_browse_id(url)
+    if album:
+        return album_info(album)
     playlist_id = extract_playlist_id(url)
     try:
         data = client().get_playlist(playlist_id, limit=None)

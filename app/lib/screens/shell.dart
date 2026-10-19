@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../state/player_controller.dart';
 import '../state/providers.dart';
+import '../state/sync.dart';
 import '../theme.dart';
 import '../util/perf.dart';
 import '../widgets/player_bar.dart';
@@ -33,7 +34,12 @@ class _ShellState extends ConsumerState<Shell> {
     super.initState();
     HardwareKeyboard.instance.addHandler(_onKey);
     // Start listening for download progress right away.
-    WidgetsBinding.instance.addPostFrameCallback((_) => ref.read(downloadsProvider));
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      ref.read(downloadsProvider);
+      // Private listening state, then a silent sync with paired devices.
+      ref.read(privateListeningProvider.notifier).load();
+      if (!kPerf) ref.read(syncProvider.notifier).startup();
+    });
     if (kPerf && kPerfAutoSeconds > 0) WidgetsBinding.instance.addPostFrameCallback((_) => _perfScript());
   }
 

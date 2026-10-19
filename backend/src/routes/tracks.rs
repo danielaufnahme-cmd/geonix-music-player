@@ -71,9 +71,32 @@ pub async fn remove(
     Ok(Json(json!({ "deleted": id, "file_deleted": file_deleted })))
 }
 
-pub async fn played(State(s): State<AppState>, Path(id): Path<String>) -> ApiResult<Json<Track>> {
+/// Count a listen. With private listening on, nothing is recorded (no play
+/// count, last played or plays row) and the answer is 204 without a body.
+pub async fn played(State(s): State<AppState>, Path(id): Path<String>) -> ApiResult<Response> {
     check_id(&id)?;
-    s.db.record_play(&id)?.map(Json).ok_or_else(|| ApiError::not_found("track not found"))
+    if s.db.private_listening()? {
+        return Ok(StatusCode::NO_CONTENT.into_response());
+    }
+    let track = s.db.record_play(&id)?.ok_or_else(|| ApiError::not_found("track not found"))?;
+    Ok(Json(track).into_response())
+}
+
+#[derive(Deserialize)]
+pub struct PrivateListening {
+    enabled: bool,
+}
+
+pub async fn get_private_listening(State(s): State<AppState>) -> ApiResult<Json<Value>> {
+    Ok(Json(json!({ "enabled": s.db.private_listening()? })))
+}
+
+pub async fn put_private_listening(
+    State(s): State<AppState>,
+    Json(body): Json<PrivateListening>,
+) -> ApiResult<Json<Value>> {
+    s.db.set_private_listening(body.enabled)?;
+    Ok(Json(json!({ "enabled": s.db.private_listening()? })))
 }
 
 pub async fn artists(State(s): State<AppState>) -> ApiResult<Json<Vec<Artist>>> {

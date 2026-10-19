@@ -10,6 +10,8 @@ pub enum ApiError {
     NotFound(String),
     Unavailable(String),
     Internal(String),
+    /// Any other status (401, 403, 409, 429 ...) with a message.
+    Status(StatusCode, String),
 }
 
 pub type ApiResult<T> = Result<T, ApiError>;
@@ -24,12 +26,15 @@ impl ApiError {
     pub fn internal(msg: impl Into<String>) -> Self {
         Self::Internal(msg.into())
     }
+    pub fn status(status: StatusCode, msg: impl Into<String>) -> Self {
+        Self::Status(status, msg.into())
+    }
 }
 
 impl std::fmt::Display for ApiError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::BadRequest(m) | Self::NotFound(m) | Self::Unavailable(m) | Self::Internal(m) => {
+            Self::BadRequest(m) | Self::NotFound(m) | Self::Unavailable(m) | Self::Internal(m) | Self::Status(_, m) => {
                 f.write_str(m)
             }
         }
@@ -43,6 +48,7 @@ impl IntoResponse for ApiError {
             Self::NotFound(_) => StatusCode::NOT_FOUND,
             Self::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
             Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::Status(s, _) => *s,
         };
         if status.is_server_error() {
             tracing::error!("{status}: {self}");

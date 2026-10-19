@@ -29,17 +29,16 @@ pub struct CreateBody {
     playlist_id: Option<i64>,
     /// Optional local name for a new imported playlist (defaults to the YouTube title).
     name: Option<String>,
+    /// With `playlist_url`: `"songs_only"` downloads the missing songs into the
+    /// library without creating or changing any playlist.
+    mode: Option<String>,
 }
 
-fn check_playlist_url(url: &str) -> ApiResult<()> {
-    let url = url.trim();
-    let is_youtube = url.starts_with("https://") || url.starts_with("http://");
-    if !is_youtube || !url.contains("list=") {
-        return Err(ApiError::bad_request(
-            "playlist_url must be a YouTube or YouTube Music link containing list=",
-        ));
-    }
-    Ok(())
+/// The canonical playlist URL for a pasted playlist (or album) link.
+pub(crate) fn playlist_source(url: &str) -> ApiResult<String> {
+    crate::resolve::playlist_source_of(url).ok_or_else(|| {
+        ApiError::bad_request("playlist_url must be a YouTube or YouTube Music playlist or album link")
+    })
 }
 
 /// `{"video_id": "..."}` queues one song; `{"playlist_url": "...", "name": "..."}`
@@ -53,12 +52,19 @@ pub async fn create(State(s): State<AppState>, Json(body): Json<CreateBody>) -> 
             Ok((StatusCode::ACCEPTED, Json(serde_json::to_value(d).map_err(|e| ApiError::internal(e.to_string()))?)))
         }
         (None, Some(url)) => {
-            check_playlist_url(&url)?;
-            let target = match body.playlist_id {
-                Some(id) => ImportTarget::Existing(id),
-                None => ImportTarget::New { name: body.name.as_deref() },
+            let source = playlist_source(&url)?;
+            let target = match (body.mode.as_deref().map(str::trim), body.playlist_id) {
+                (Some("songs_only"), None) => ImportTarget::LibraryOnly,
+                (Some("songs_only"), Some(_)) => {
+                    return Err(ApiError::bad_request("songs_only imports don't take a playlist_id"))
+                }
+                (Some(m), _) if !m.is_empty() && m != "playlist" => {
+                    return Err(ApiError::bad_request("mode must be songs_only or omitted"))
+                }
+                (_, Some(id)) => ImportTarget::Existing(id),
+                (_, None) => ImportTarget::New { name: body.name.as_deref() },
             };
-            let import = s.downloads.enqueue_playlist(url.trim(), target).await?;
+            let import = s.downloads.enqueue_playlist(&source, target).await?;
             Ok((
                 StatusCode::ACCEPTED,
                 Json(serde_json::to_value(import).map_err(|e| ApiError::internal(e.to_string()))?),
@@ -82,10 +88,10 @@ pub async fn retry(State(s): State<AppState>, Path(id): Path<String>) -> ApiResu
 }
 
 /// Every download change as an SSE `download` event carrying the download
-/// JSON. If a slow client misses events it gets a `resync` event and should
-/// re-fetch `GET /api/downloads`.
+/// JSON, plus device-sync progress as `sync` events. If a slow client misses
+/// events it gets a `resync` event and should re-fetch `GET /api/downloads`.
 pub async fn events(State(s): State<AppState>) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    let stream = BroadcastStream::new(s.downloads.subscribe()).map(|msg| {
+    let downloads = BroadcastStream::new(s.downloads.subscribe()).map(|msg| {
         Ok(match msg {
             Ok(d) => Event::default()
                 .event("download")
@@ -94,6 +100,10 @@ pub async fn events(State(s): State<AppState>) -> Sse<impl Stream<Item = Result<
             Err(BroadcastStreamRecvError::Lagged(_)) => Event::default().event("resync").data("{}"),
         })
     });
+    let sync = BroadcastStream::new(s.sync.subscribe()).filter_map(|msg| {
+        msg.ok().and_then(|ev| Event::default().event("sync").json_data(&ev).ok()).map(Ok)
+    });
+    let stream = downloads.merge(sync);
     Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
 }
 
@@ -104,8 +114,8 @@ pub struct InfoQuery {
 
 /// Preview a playlist before downloading it.
 pub async fn playlist_info(State(s): State<AppState>, Query(p): Query<InfoQuery>) -> ApiResult<Json<PlaylistInfoOut>> {
-    check_playlist_url(&p.url)?;
-    let info: PlaylistInfo = s.downloads.playlist_info(p.url.trim()).await?;
+    let source = playlist_source(&p.url)?;
+    let info: PlaylistInfo = s.downloads.playlist_info(&source).await?;
     let ids: Vec<String> = info.tracks.iter().map(|t| t.video_id.clone()).collect();
     let have = s.db.downloaded_set(&ids)?;
     let tracks = info
@@ -121,8 +131,8 @@ pub async fn playlist_info(State(s): State<AppState>, Query(p): Query<InfoQuery>
 
 #[derive(serde::Serialize)]
 pub struct PlaylistInfoOut {
-    title: String,
-    tracks: Vec<crate::models::Track>,
+    pub(crate) title: String,
+    pub(crate) tracks: Vec<crate::models::Track>,
 }
 
 /// Remove one finished download record from the list. The music file stays.

@@ -5,7 +5,9 @@ import '../models/playlist.dart';
 import '../state/actions.dart';
 import '../state/desktop_theme.dart';
 import '../state/providers.dart';
+import '../state/sync.dart';
 import '../theme.dart';
+import 'devices_dialog.dart';
 import 'playlist_cover.dart';
 import 'skeleton.dart';
 
@@ -110,8 +112,120 @@ class Sidebar extends ConsumerWidget {
             ),
           ),
         ),
-        Padding(padding: const EdgeInsets.all(10), child: _ThemeMenu(collapsed: collapsed)),
+        PrivateListeningToggle(collapsed: collapsed),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(10, 4, 10, 10),
+          child: collapsed
+              ? Column(mainAxisSize: MainAxisSize.min, children: [
+                  const DevicesButton(),
+                  _ThemeMenu(collapsed: collapsed),
+                ])
+              : Row(children: [
+                  Expanded(child: _ThemeMenu(collapsed: collapsed)),
+                  const DevicesButton(),
+                ]),
+        ),
       ]),
+    );
+  }
+}
+
+/// Opens the devices dialog (pairing + sync). Hidden when the backend has
+/// no sync support; shows a dot while a sync runs.
+class DevicesButton extends ConsumerWidget {
+  const DevicesButton({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final gx = context.gx;
+    final sync = ref.watch(syncProvider.select((s) => (s.available, s.running)));
+    if (sync.$1 == false) return const SizedBox.shrink();
+    return IconButton(
+      tooltip: sync.$2 ? 'Devices · syncing…' : 'Devices',
+      onPressed: () => showDevicesDialog(context),
+      icon: Badge(
+        isLabelVisible: sync.$2,
+        smallSize: 8,
+        backgroundColor: gx.accent,
+        child: Icon(Icons.devices_rounded, color: sync.$2 ? gx.accent : gx.muted, size: 20),
+      ),
+    );
+  }
+}
+
+/// One-click "Private listening" switch: while on, plays don't feed the
+/// recommendations. Hidden until the backend reports the setting.
+class PrivateListeningToggle extends ConsumerStatefulWidget {
+  const PrivateListeningToggle({super.key, required this.collapsed});
+  final bool collapsed;
+
+  @override
+  ConsumerState<PrivateListeningToggle> createState() => _PrivateListeningToggleState();
+}
+
+class _PrivateListeningToggleState extends ConsumerState<PrivateListeningToggle> {
+  bool _hover = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final enabled = ref.watch(privateListeningProvider);
+    if (enabled == null) return const SizedBox.shrink();
+    final gx = context.gx;
+    final text = Theme.of(context).textTheme;
+    final color = enabled ? gx.accent : (_hover ? gx.text : gx.muted);
+    return Tooltip(
+      message: widget.collapsed
+          ? 'Private listening ${enabled ? 'on' : 'off'} — songs you play now won\'t affect recommendations'
+          : 'Songs you play now won\'t affect recommendations',
+      child: Semantics(
+        button: true,
+        toggled: enabled,
+        label: 'Private listening',
+        child: MouseRegion(
+          cursor: SystemMouseCursors.click,
+          onEnter: (_) => setState(() => _hover = true),
+          onExit: (_) => setState(() => _hover = false),
+          child: GestureDetector(
+            onTap: () => ref.read(privateListeningProvider.notifier).toggle(),
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 180),
+              margin: const EdgeInsets.fromLTRB(10, 6, 10, 0),
+              padding: EdgeInsets.symmetric(horizontal: widget.collapsed ? 0 : 14, vertical: 10),
+              decoration: BoxDecoration(
+                color: enabled ? gx.accentSoft : (_hover ? gx.text.withValues(alpha: 0.05) : Colors.transparent),
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(color: enabled ? gx.accent.withValues(alpha: 0.4) : gx.outline),
+              ),
+              child: Row(
+                mainAxisAlignment: widget.collapsed ? MainAxisAlignment.center : MainAxisAlignment.start,
+                children: [
+                  Icon(enabled ? Icons.visibility_off_rounded : Icons.visibility_outlined, color: color, size: 20),
+                  if (!widget.collapsed) ...[
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Text('Private listening',
+                          overflow: TextOverflow.ellipsis,
+                          softWrap: false,
+                          style: text.bodyMedium?.copyWith(color: color, fontWeight: FontWeight.w600)),
+                    ),
+                    AnimatedContainer(
+                      duration: const Duration(milliseconds: 180),
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: enabled ? gx.accent : gx.text.withValues(alpha: 0.08),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Text(enabled ? 'ON' : 'OFF',
+                          style: text.labelSmall?.copyWith(
+                              color: enabled ? gx.onAccent : gx.muted, fontWeight: FontWeight.w800, letterSpacing: 0.8)),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
     );
   }
 }

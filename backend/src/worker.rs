@@ -4,7 +4,7 @@
 //! every in-flight request fails with an error.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -61,6 +61,35 @@ pub struct Worker {
 pub struct WorkerConfig {
     pub python: PathBuf,
     pub script: PathBuf,
+}
+
+/// Python interpreters to try, best first. The worker's own venv wins
+/// (`.venv/bin/python` on Linux/macOS, `.venv\Scripts\python.exe` on
+/// Windows), then the configured interpreter, then whatever is on PATH.
+/// A path with directories (e.g. from GEONIX_PYTHON) is used as given, so
+/// main.rs's bare "python3" fallback also finds a Windows venv.
+fn python_candidates(python: &Path, script: &Path) -> Vec<PathBuf> {
+    if python.components().count() > 1 {
+        return vec![python.to_path_buf()];
+    }
+    let mut out: Vec<PathBuf> = Vec::new();
+    if let Some(venv) = script.parent().map(|d| d.join(".venv")) {
+        for p in [venv.join("bin").join("python"), venv.join("Scripts").join("python.exe")] {
+            if p.is_file() {
+                out.push(p);
+            }
+        }
+    }
+    // On Windows "python3" is often the Microsoft Store stub (it starts, then
+    // just exits), so plain "python" goes first there.
+    let names: &[&str] = if cfg!(windows) { &["python", "python3"] } else { &["python3", "python"] };
+    let configured = (!cfg!(windows) || python != Path::new("python3")).then(|| python.to_path_buf());
+    for p in configured.into_iter().chain(names.iter().map(PathBuf::from)) {
+        if !out.contains(&p) {
+            out.push(p);
+        }
+    }
+    out
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -174,14 +203,31 @@ async fn supervise(inner: Arc<Inner>, config: WorkerConfig) {
 }
 
 async fn run_once(inner: &Arc<Inner>, config: &WorkerConfig) -> std::io::Result<std::process::ExitStatus> {
-    let mut child = Command::new(&config.python)
-        .arg("-u")
-        .arg(&config.script)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .kill_on_drop(true)
-        .spawn()?;
+    let mut child = None;
+    let mut last_err = std::io::Error::new(std::io::ErrorKind::NotFound, "no python interpreter found");
+    for python in python_candidates(&config.python, &config.script) {
+        let spawned = Command::new(&python)
+            .arg("-u")
+            .arg(&config.script)
+            // The protocol is UTF-8; Windows defaults to the ANSI code page.
+            .env("PYTHONUTF8", "1")
+            .env("PYTHONIOENCODING", "utf-8")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .kill_on_drop(true)
+            .spawn();
+        match spawned {
+            Ok(c) => {
+                child = Some(c);
+                break;
+            }
+            // Only a missing interpreter is worth trying the next one for.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => last_err = e,
+            Err(e) => return Err(e),
+        }
+    }
+    let Some(mut child) = child else { return Err(last_err) };
 
     let mut stdin = child.stdin.take().ok_or_else(|| std::io::Error::other("no stdin"))?;
     let stdout = child.stdout.take().ok_or_else(|| std::io::Error::other("no stdout"))?;
@@ -239,6 +285,28 @@ mod tests {
         dispatch(&inner, r#"{"id":"abc","type":"result","data":{"ok":true}}"#);
         assert_eq!(rrx.try_recv().unwrap().unwrap(), json!({"ok": true}));
         assert!(lock(&inner.pending).is_empty());
+    }
+
+    #[test]
+    fn python_candidates_prefer_the_venv_on_any_os() {
+        let dir = std::env::temp_dir().join(format!("geonix-py-{}", uuid::Uuid::new_v4()));
+        let script = dir.join("worker.py");
+        let win = dir.join(".venv").join("Scripts").join("python.exe");
+        std::fs::create_dir_all(win.parent().unwrap()).unwrap();
+        std::fs::write(&win, b"").unwrap();
+
+        let c = python_candidates(Path::new("python3"), &script);
+        assert_eq!(c[0], win);
+        assert!(c.contains(&PathBuf::from("python3")) && c.contains(&PathBuf::from("python")));
+        assert_eq!(c.iter().filter(|p| p.as_path() == Path::new("python3")).count(), 1);
+
+        // An explicit path is never second-guessed.
+        let explicit = dir.join("custom").join("python");
+        assert_eq!(python_candidates(&explicit, &script), vec![explicit]);
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let none = python_candidates(Path::new("python3"), &dir.join("worker.py"));
+        assert!(none[0] == Path::new("python3") || none[0] == Path::new("python"));
     }
 
     #[test]

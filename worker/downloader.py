@@ -52,13 +52,19 @@ def attempt_options(base: dict[str, Any], attempt: int) -> dict[str, Any]:
 ProgressFn = Callable[[dict[str, Any]], None]
 
 _BAD_CHARS = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
+_RESERVED = re.compile(r"^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(\..*)?$", re.IGNORECASE)
 
 
 def safe_name(name: str, fallback: str = "Unknown") -> str:
     """Make a string safe as a single path component."""
     cleaned = _BAD_CHARS.sub("_", name or "").strip().strip(".")
     cleaned = re.sub(r"\s+", " ", cleaned)
-    return (cleaned or fallback)[:120]
+    # Windows rejects names ending in a dot or space (also after cutting to
+    # length) and reserves device names like CON or COM1, even with a suffix.
+    cleaned = cleaned[:120].rstrip(" .")
+    if _RESERVED.match(cleaned):
+        cleaned = f"_{cleaned}"
+    return cleaned or fallback
 
 
 def human_speed(bytes_per_sec: float | None) -> str | None:
